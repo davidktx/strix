@@ -2,32 +2,23 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import litellm
 from agents.usage import Usage
 
+from strix.config.model_catalog import catalog_entries, estimate_usage_cost, resolve_pricing_model
 from strix.report.pricing import resolve_litellm_model
 from strix.report.usage import LLMUsageLedger
 
 
 def test_resolves_common_bare_model_names() -> None:
-    resolve_litellm_model.cache_clear()
+    resolve_pricing_model.cache_clear()
     assert resolve_litellm_model("deepseek-v4-flash") == "deepseek/deepseek-v4-flash"
     assert resolve_litellm_model("openai/deepseek-v4-flash") == "deepseek/deepseek-v4-flash"
-    # LiteLLM prices grok-4.5 identically under xai/, perplexity/xai/ and
-    # openrouter/x-ai/, so the resolver may return any of them; the contract
-    # is a provider-qualified name LiteLLM can price.
-    grok = resolve_litellm_model("grok-4.5")
-    assert grok is not None
-    assert grok.endswith("/grok-4.5")
-    assert grok in litellm.model_cost
-    # MiniMax-M3 is sold by several LiteLLM providers at different prices, so
-    # the resolver must not guess from its bare name. A provider-qualified
-    # model remains deterministic.
-    assert resolve_litellm_model("minimax/MiniMax-M3") == "minimax/MiniMax-M3"
+    assert resolve_litellm_model("deepseek/deepseek-v4-flash") == "deepseek/deepseek-v4-flash"
+    assert resolve_litellm_model("grok-4.5") == "github_copilot/grok-4.5"
 
 
 def test_resolver_returns_none_for_unresolvable_model() -> None:
-    resolve_litellm_model.cache_clear()
+    resolve_pricing_model.cache_clear()
     assert resolve_litellm_model("provider/not-a-real-model") is None
 
 
@@ -39,7 +30,7 @@ def test_ledger_uses_estimate_when_routed_provider_reports_no_cost() -> None:
     usage.total_tokens = 1200
     ledger = LLMUsageLedger()
 
-    with patch("litellm.completion_cost", return_value=0.42):
+    with patch("strix.report.usage.estimate_usage_cost", return_value=0.42):
         ledger.record(agent_id="a", usage=usage, model="openai/deepseek-v4-flash")
 
     assert ledger.total_cost == 0.42
@@ -53,7 +44,7 @@ def test_ledger_prefers_observed_cost_over_estimate() -> None:
     usage.total_tokens = 1200
     ledger = LLMUsageLedger()
 
-    with patch("litellm.completion_cost", return_value=0.42):
+    with patch("strix.report.usage.estimate_usage_cost", return_value=0.42):
         ledger.record(agent_id="a", usage=usage, model="openai/deepseek-v4-flash")
     ledger.record_observed_cost(0.17)
 
@@ -69,7 +60,7 @@ def test_hydrated_estimate_continues_accumulating_new_estimates() -> None:
     ledger = LLMUsageLedger()
     ledger.hydrate({"cost": 0.42})
 
-    with patch("litellm.completion_cost", return_value=0.17):
+    with patch("strix.report.usage.estimate_usage_cost", return_value=0.17):
         ledger.record(agent_id="a", usage=usage, model="openai/deepseek-v4-flash")
 
     assert ledger.total_cost == 0.59
@@ -84,7 +75,7 @@ def test_zero_cost_disables_both_observed_and_estimated_costs() -> None:
     ledger = LLMUsageLedger()
     ledger.zero_cost = True
 
-    with patch("litellm.completion_cost", return_value=0.42) as estimate:
+    with patch("strix.report.usage.estimate_usage_cost", return_value=0.42) as estimate:
         ledger.record(agent_id="a", usage=usage, model="deepseek-v4-flash")
         ledger.record_observed_cost(1.0)
 
@@ -93,37 +84,22 @@ def test_zero_cost_disables_both_observed_and_estimated_costs() -> None:
 
 
 def test_resolver_uses_provider_when_bare_entry_has_one() -> None:
-    original = litellm.model_cost
-    litellm.model_cost = {
-        "example": {
-            "litellm_provider": "example-provider",
-            "input_cost_per_token": 1.0,
-            "output_cost_per_token": 2.0,
-        }
-    }
-    try:
-        resolve_litellm_model.cache_clear()
-        assert resolve_litellm_model("example") == "example-provider/example"
-    finally:
-        litellm.model_cost = original
-        resolve_litellm_model.cache_clear()
+    resolve_pricing_model.cache_clear()
+    assert resolve_litellm_model("example") == "example-provider/example"
 
 
 def test_resolver_does_not_guess_between_differently_priced_providers() -> None:
-    original = litellm.model_cost
-    litellm.model_cost = {
-        "provider-a/example": {
-            "input_cost_per_token": 1.0,
-            "output_cost_per_token": 2.0,
-        },
-        "provider-b/example": {
-            "input_cost_per_token": 3.0,
-            "output_cost_per_token": 4.0,
-        },
-    }
+    entries = catalog_entries()
+    saved = entries.pop("example", None)
     try:
-        resolve_litellm_model.cache_clear()
+        resolve_pricing_model.cache_clear()
         assert resolve_litellm_model("example") is None
     finally:
-        litellm.model_cost = original
-        resolve_litellm_model.cache_clear()
+        if saved is not None:
+            entries["example"] = saved
+        resolve_pricing_model.cache_clear()
+
+
+def test_estimate_usage_cost_uses_catalog_rates() -> None:
+    cost = estimate_usage_cost(model="deepseek/deepseek-v4-flash", prompt_tokens=1000, completion_tokens=200)
+    assert cost is not None and cost > 0

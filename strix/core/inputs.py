@@ -11,15 +11,12 @@ from openai.types.shared import Reasoning
 from strix.config.models import (
     DEFAULT_MODEL_RETRY,
     OPENROUTER_ATTRIBUTION_HEADERS,
-    bedrock_route_supports_prompt_caching,
-    is_bedrock_route,
-    is_claude_model,
     is_known_openai_bare_model,
     is_openrouter_model,
     model_supports_reasoning,
     request_timeout_extra_args,
-    routes_through_litellm,
 )
+from strix.config.openrouter import sticky_session_extra_body
 from strix.core.sessions import scrub_images_from_items
 
 
@@ -252,15 +249,20 @@ def make_model_settings(
     extra_headers: dict[str, str] | None = None,
     extra_body: dict[str, Any] | None = None,
     has_tools: bool = True,
+    agent_id: str | None = None,
 ) -> ModelSettings:
     headers = _request_headers(model_name, extra_headers)
+    merged_body = dict(extra_body) if extra_body else {}
+    sticky = sticky_session_extra_body(agent_id)
+    if sticky:
+        merged_body.update(sticky)
     model_settings = ModelSettings(
         parallel_tool_calls=False if has_tools else None,
         retry=DEFAULT_MODEL_RETRY,
         include_usage=True,
         extra_args=request_timeout_extra_args(request_timeout),
         extra_headers=headers,
-        extra_body=dict(extra_body) if extra_body else None,
+        extra_body=merged_body or None,
     )
     if (
         reasoning_effort is not None
@@ -273,13 +275,6 @@ def make_model_settings(
     if force_required_tool_choice and _accepts_required_tool_choice(model_name):
         model_settings = model_settings.resolve(ModelSettings(tool_choice="required"))
 
-    cache_extra_args = _prompt_cache_extra_args(model_name) if prompt_cache else None
-    if cache_extra_args:
-        model_settings = model_settings.resolve(
-            ModelSettings(
-                extra_args={**(model_settings.extra_args or {}), **cache_extra_args},
-            ),
-        )
     return model_settings
 
 
@@ -311,34 +306,6 @@ def _reasoning_settings(
     if effort != "max":
         return ModelSettings(reasoning=Reasoning(effort=effort))
     return ModelSettings(extra_body={**(extra_body or {}), "reasoning_effort": "max"})
-
-
-def _prompt_cache_extra_args(model_name: str) -> dict[str, Any] | None:
-    """LiteLLM ``cache_control_injection_points`` for Claude prompt caching.
-
-    A breakpoint on each system message, plus a rolling last-message one. The
-    system prompt is split into up to three messages, which with the last
-    message uses all four breakpoints Claude allows. There is none on
-    ``tool_config``: the tools come before the system prompt, so its first
-    breakpoint caches them too. Unmapped Bedrock models get no points at all:
-    Bedrock rejects the passed-through field outright.
-
-    The field is LiteLLM's own, consumed by its transform, so it only goes to
-    routes LiteLLM serves. A bare ``claude-...`` name is served by the SDK's
-    OpenAI client instead (a gateway in front of Claude), and that client raises
-    ``TypeError`` on request kwargs it does not know.
-    """
-    if not is_claude_model(model_name) or not routes_through_litellm(model_name):
-        return None
-    if is_bedrock_route(model_name) and not bedrock_route_supports_prompt_caching(model_name):
-        return None
-
-    return {
-        "cache_control_injection_points": [
-            {"location": "message", "role": "system"},
-            {"location": "message", "index": -1},
-        ]
-    }
 
 
 def child_initial_input(

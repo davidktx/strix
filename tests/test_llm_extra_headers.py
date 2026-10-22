@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-import litellm
 import pytest
 from agents.models import _openai_shared
 
@@ -28,13 +27,10 @@ def _reset(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(loader, "_cached", None)
     monkeypatch.setattr(loader, "_override", None)
 
-    saved_headers = litellm.headers
     saved_client = _openai_shared.get_default_openai_client()
-    litellm.headers = None
     try:
         yield
     finally:
-        litellm.headers = saved_headers
         _openai_shared.set_default_openai_client(saved_client)  # type: ignore[arg-type]
 
 
@@ -44,32 +40,18 @@ def test_extra_headers_parsed_from_json_env(monkeypatch: pytest.MonkeyPatch) -> 
     assert settings.llm.extra_headers == {"X-A": "1", "X-B": "2"}
 
 
-def test_extra_headers_merged_into_litellm_headers(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRIX_LLM", "litellm/openai/some-model")
-    monkeypatch.setenv("LLM_API_BASE", "https://gateway.example/v1")
-    monkeypatch.setenv("LLM_API_KEY", "token")
-    headers = {"X-Feature-Key": "svc", "X-Tenant": "acme"}
-    monkeypatch.setenv("LLM_EXTRA_HEADERS", json.dumps(headers))
-
-    configure_sdk_model_defaults(load_settings())
-
-    current: object = litellm.headers
-    assert isinstance(current, dict)
-    assert current["X-Feature-Key"] == "svc"
-    assert current["X-Tenant"] == "acme"
-
-
 def test_extra_headers_applied_to_native_openai_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STRIX_LLM", "openai/some-model")
     monkeypatch.setenv("LLM_API_BASE", "https://gateway.example/v1")
     monkeypatch.setenv("LLM_API_KEY", "token")
-    monkeypatch.setenv("LLM_EXTRA_HEADERS", json.dumps({"X-Feature-Key": "svc"}))
+    monkeypatch.setenv("LLM_EXTRA_HEADERS", json.dumps({"X-Feature-Key": "svc", "X-Tenant": "acme"}))
 
     configure_sdk_model_defaults(load_settings())
 
     client = _openai_shared.get_default_openai_client()
     assert client is not None
     assert client.default_headers.get("X-Feature-Key") == "svc"
+    assert client.default_headers.get("X-Tenant") == "acme"
     assert str(client.base_url).rstrip("/") == "https://gateway.example/v1"
 
 
@@ -87,11 +69,11 @@ def test_extra_headers_applied_to_native_openai_without_custom_base(
     assert client.default_headers.get("X-Feature-Key") == "svc"
 
 
-def test_no_extra_headers_leaves_litellm_headers_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_extra_headers_leaves_client_defaults_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STRIX_LLM", "openai/some-model")
     monkeypatch.setenv("LLM_API_BASE", "https://gateway.example/v1")
     monkeypatch.setenv("LLM_API_KEY", "token")
 
     configure_sdk_model_defaults(load_settings())
 
-    assert litellm.headers is None
+    assert _openai_shared.get_default_openai_client() is None

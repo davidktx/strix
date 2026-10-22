@@ -5,8 +5,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import pytest
-from litellm.exceptions import BadRequestError, ContextWindowExceededError, RateLimitError
+from openai import APIStatusError
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
 from strix.config import ContextSettings
@@ -72,42 +73,34 @@ def _has_orphan_tool_output(items: list[Any]) -> bool:
     return any(i["call_id"] not in call_ids for i in items if compaction._is_tool_output(i))
 
 
-def test_is_context_overflow_uses_litellm_typed_error() -> None:
-    overflow = ContextWindowExceededError(
-        message="context length exceeded", model="m", llm_provider="openai"
-    )
+def _api_status_error(status: int, message: str) -> APIStatusError:
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(status, request=request, text=message)
+    return APIStatusError(message, response=response, body=None)
+
+
+def test_is_context_overflow_matches_openai_status_errors() -> None:
+    overflow = _api_status_error(400, "context length exceeded for this model")
     assert compaction.is_context_overflow(overflow)
-    assert not compaction.is_context_overflow(
-        RateLimitError(message="slow down", model="m", llm_provider="openai")
-    )
+    assert not compaction.is_context_overflow(_api_status_error(429, "slow down"))
     assert not compaction.is_context_overflow(RuntimeError("maximum context length is 8192"))
 
 
-def test_is_context_overflow_matches_untyped_openrouter_400() -> None:
-    # OpenRouter overflows arrive as a plain BadRequestError, so match the message.
-    openrouter = BadRequestError(
-        message=(
-            "litellm.BadRequestError: This endpoint's maximum context length is 16385 "
-            "tokens. However, you requested about 75064 tokens. Please reduce the length "
-            "of the messages."
+def test_is_context_overflow_matches_gateway_overflow_message() -> None:
+    openrouter = _api_status_error(
+        400,
+        (
+            "This endpoint's maximum context length is 16385 tokens. However, you requested "
+            "about 75064 tokens. Please reduce the length of the messages."
         ),
-        model="openrouter/openai/gpt-3.5-turbo",
-        llm_provider="openrouter",
     )
     assert compaction.is_context_overflow(openrouter)
 
 
 def test_is_context_overflow_ignores_rate_limit_shaped_bad_request() -> None:
-    # A 400 that is really throttling must never be treated as an overflow.
-    throttled = BadRequestError(
-        message="Rate limit exceeded, please slow down",
-        model="openrouter/openai/gpt-4o",
-        llm_provider="openrouter",
-    )
+    throttled = _api_status_error(400, "Rate limit exceeded, please slow down")
     assert not compaction.is_context_overflow(throttled)
-    unrelated = BadRequestError(
-        message="Invalid value for 'temperature'", model="m", llm_provider="openrouter"
-    )
+    unrelated = _api_status_error(400, "Invalid value for 'temperature'")
     assert not compaction.is_context_overflow(unrelated)
 
 
