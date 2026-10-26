@@ -1,6 +1,6 @@
 """Background pre-import of the heavy scan dependencies.
 
-The scan engine's import graph (the agents SDK, OpenAI client, LiteLLM, the
+The scan engine's import graph (the agents SDK, OpenAI client, the
 Caido SDK) costs seconds to import cold, but none of it is needed until a scan
 actually starts. Importing it on a daemon thread at CLI entry overlaps that
 cost with the I/O-bound startup work that always precedes a scan (argument
@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 WARMUP_MODULES = (
     "strix.core.runner",
-    "litellm",
     "caido_sdk_client",
 )
 

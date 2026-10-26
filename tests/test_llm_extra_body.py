@@ -6,10 +6,8 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import httpx
-import litellm
 import openai
 import pytest
-from agents.extensions.models.litellm_model import LitellmModel
 from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_responses import OpenAIResponsesModel
@@ -79,19 +77,3 @@ async def test_extra_body_reaches_native_openai_request_body(model_cls: type) ->
         await _send(model_cls(model="gpt-5", openai_client=_capturing_client(captured)))
 
     assert {k: captured.get(k) for k in _EXTRA_BODY} == _EXTRA_BODY
-
-
-@pytest.mark.asyncio
-async def test_extra_body_passed_to_litellm(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-
-    async def fake_acompletion(**kwargs: Any) -> Any:
-        captured.update(kwargs)
-        raise RuntimeError("captured")
-
-    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
-
-    with pytest.raises(RuntimeError, match="captured"):
-        await _send(LitellmModel(model="openai/gpt-5", base_url="https://gateway.example/v1"))
-
-    assert captured["extra_body"] == _EXTRA_BODY

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from strix.config import codex
 from strix.config.loader import load_settings
+from strix.config.model_catalog import estimate_usage_cost
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.report.coverage import write_coverage
 from strix.report.pricing import resolve_litellm_model
@@ -1172,14 +1173,7 @@ def _usage_reported_cost(completion_response: Any) -> float | None:
 
 
 def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | None:
-    """Best-effort LiteLLM cost-map estimate when no provider-reported cost exists.
-
-    LiteLLM strips provider cost fields when rebuilding streamed responses and
-    returns no ``response_cost`` for models missing from its cost map, so try
-    the provider-prefixed name, the raw name, and the bare model name.
-    """
-    from litellm import completion_cost
-
+    """Best-effort catalog estimate when no provider-reported cost exists."""
     model = kwargs.get("model") if isinstance(kwargs, dict) else None
     if not isinstance(model, str) or not model:
         if isinstance(completion_response, dict):
@@ -1189,19 +1183,14 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
     if not isinstance(model, str) or not model:
         return None
 
-    provider = None
-    litellm_params = kwargs.get("litellm_params") if isinstance(kwargs, dict) else None
-    if isinstance(litellm_params, dict):
-        provider = litellm_params.get("custom_llm_provider")
-
     usage_payload = _usage_payload(completion_response)
     if usage_payload is None:
         return None
 
-    candidates: list[str] = []
-    if isinstance(provider, str) and provider and not model.startswith(f"{provider}/"):
-        candidates.append(f"{provider}/{model}")
-    candidates.append(model)
+    prompt_tokens = int(_number(usage_payload.get("prompt_tokens")))
+    completion_tokens = int(_number(usage_payload.get("completion_tokens")))
+
+    candidates = [model]
     if "/" in model:
         candidates.append(model.rsplit("/", 1)[-1])
 
@@ -1209,15 +1198,13 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
         resolved = resolve_litellm_model(candidate)
         if not resolved:
             continue
-        try:
-            value = completion_cost(
-                completion_response={"model": resolved, "usage": usage_payload},
-                model=resolved,
-            )
-        except Exception:  # nosec B112  # noqa: BLE001, S112
-            continue
-        if isinstance(value, int | float) and value > 0:
-            return float(value)
+        value = estimate_usage_cost(
+            model=resolved,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+        if value is not None and value > 0:
+            return value
     return None
 
 
