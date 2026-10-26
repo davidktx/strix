@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import pytest

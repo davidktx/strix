@@ -27,8 +27,8 @@ _MODELS: dict[str, ModelCatalogEntry] = {
         "provider": "openai",
         "max_input_tokens": 128_000,
         "max_output_tokens": 16_384,
-        "input_cost_per_token": 2.5e-06,
-        "output_cost_per_token": 1e-05,
+        "input_cost_per_token": 2.5e-06,  # nosec B105 - price, not a secret
+        "output_cost_per_token": 1e-05,  # nosec B105 - price, not a secret
         "supports_vision": True,
         "supports_prompt_caching": True,
     },
@@ -36,8 +36,8 @@ _MODELS: dict[str, ModelCatalogEntry] = {
         "provider": "openai",
         "max_input_tokens": 272_000,
         "max_output_tokens": 128_000,
-        "input_cost_per_token": 1.25e-06,
-        "output_cost_per_token": 1e-05,
+        "input_cost_per_token": 1.25e-06,  # nosec B105 - price, not a secret
+        "output_cost_per_token": 1e-05,  # nosec B105 - price, not a secret
         "supports_vision": True,
         "supports_reasoning": True,
         "supported_endpoints": ["/v1/chat/completions", "/v1/batch", "/v1/responses"],
@@ -47,8 +47,8 @@ _MODELS: dict[str, ModelCatalogEntry] = {
         "provider": "openai",
         "max_input_tokens": 1_050_000,
         "max_output_tokens": 128_000,
-        "input_cost_per_token": 2.5e-06,
-        "output_cost_per_token": 1.5e-05,
+        "input_cost_per_token": 2.5e-06,  # nosec B105 - price, not a secret
+        "output_cost_per_token": 1.5e-05,  # nosec B105 - price, not a secret
         "supports_vision": True,
         "supports_reasoning": True,
         "supported_endpoints": ["/v1/chat/completions", "/v1/batch", "/v1/responses"],
@@ -58,8 +58,8 @@ _MODELS: dict[str, ModelCatalogEntry] = {
         "provider": "openai",
         "max_input_tokens": 922_000,
         "max_output_tokens": 128_000,
-        "input_cost_per_token": 4e-06,
-        "output_cost_per_token": 2e-05,
+        "input_cost_per_token": 4e-06,  # nosec B105 - price, not a secret
+        "output_cost_per_token": 2e-05,  # nosec B105 - price, not a secret
         "supports_vision": True,
         "supports_reasoning": True,
         "supported_endpoints": ["/v1/chat/completions", "/v1/batch", "/v1/responses"],
@@ -69,8 +69,8 @@ _MODELS: dict[str, ModelCatalogEntry] = {
         "provider": "openai",
         "max_input_tokens": 922_000,
         "max_output_tokens": 128_000,
-        "input_cost_per_token": 4e-06,
-        "output_cost_per_token": 2e-05,
+        "input_cost_per_token": 4e-06,  # nosec B105 - price, not a secret
+        "output_cost_per_token": 2e-05,  # nosec B105 - price, not a secret
         "supports_vision": True,
         "supports_reasoning": True,
         "supported_endpoints": ["/v1/responses"],
@@ -80,8 +80,8 @@ _MODELS: dict[str, ModelCatalogEntry] = {
         "provider": "deepseek",
         "max_input_tokens": 1_000_000,
         "max_output_tokens": 393_216,
-        "input_cost_per_token": 3e-07,
-        "output_cost_per_token": 1.2e-06,
+        "input_cost_per_token": 3e-07,  # nosec B105 - price, not a secret
+        "output_cost_per_token": 1.2e-06,  # nosec B105 - price, not a secret
         "supports_vision": True,
         "supports_reasoning": True,
         "supported_endpoints": ["/v1/chat/completions"],
@@ -91,8 +91,8 @@ _MODELS: dict[str, ModelCatalogEntry] = {
         "provider": "deepseek",
         "max_input_tokens": 1_000_000,
         "max_output_tokens": 393_216,
-        "input_cost_per_token": 3e-07,
-        "output_cost_per_token": 1.2e-06,
+        "input_cost_per_token": 3e-07,  # nosec B105 - price, not a secret
+        "output_cost_per_token": 1.2e-06,  # nosec B105 - price, not a secret
         "supports_vision": True,
         "supports_reasoning": True,
         "supported_endpoints": ["/v1/chat/completions"],
@@ -102,8 +102,8 @@ _MODELS: dict[str, ModelCatalogEntry] = {
         "provider": "minimax",
         "max_input_tokens": 1_000_000,
         "max_output_tokens": 128_000,
-        "input_cost_per_token": 3e-07,
-        "output_cost_per_token": 1.2e-06,
+        "input_cost_per_token": 3e-07,  # nosec B105 - price, not a secret
+        "output_cost_per_token": 1.2e-06,  # nosec B105 - price, not a secret
         "supports_vision": True,
         "supports_reasoning": True,
         "supports_prompt_caching": True,
@@ -112,8 +112,8 @@ _MODELS: dict[str, ModelCatalogEntry] = {
         "provider": "github_copilot",
         "max_input_tokens": 500_000,
         "max_output_tokens": 500_000,
-        "input_cost_per_token": 2e-06,
-        "output_cost_per_token": 6e-06,
+        "input_cost_per_token": 2e-06,  # nosec B105 - price, not a secret
+        "output_cost_per_token": 6e-06,  # nosec B105 - price, not a secret
         "supports_vision": True,
         "supports_reasoning": True,
         "supported_endpoints": ["/v1/chat/completions"],
@@ -122,24 +122,24 @@ _MODELS: dict[str, ModelCatalogEntry] = {
         "provider": "github_copilot",
         "max_input_tokens": 500_000,
         "max_output_tokens": 500_000,
-        "input_cost_per_token": 2e-06,
-        "output_cost_per_token": 6e-06,
+        "input_cost_per_token": 2e-06,  # nosec B105 - price, not a secret
+        "output_cost_per_token": 6e-06,  # nosec B105 - price, not a secret
         "supports_vision": True,
         "supports_reasoning": True,
         "supported_endpoints": ["/v1/chat/completions"],
     },
     "example": {
         "provider": "example-provider",
-        "input_cost_per_token": 1.0,
-        "output_cost_per_token": 2.0,
+        "input_cost_per_token": 1.0,  # nosec B105 - price, not a secret
+        "output_cost_per_token": 2.0,  # nosec B105 - price, not a secret
     },
     "provider-a/example": {
-        "input_cost_per_token": 1.0,
-        "output_cost_per_token": 2.0,
+        "input_cost_per_token": 1.0,  # nosec B105 - price, not a secret
+        "output_cost_per_token": 2.0,  # nosec B105 - price, not a secret
     },
     "provider-b/example": {
-        "input_cost_per_token": 3.0,
-        "output_cost_per_token": 4.0,
+        "input_cost_per_token": 3.0,  # nosec B105 - price, not a secret
+        "output_cost_per_token": 4.0,  # nosec B105 - price, not a secret
     },
 }
 

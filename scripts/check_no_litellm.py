@@ -17,9 +17,11 @@ def _check_pyproject() -> list[str]:
     errors: list[str] = []
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     deps = data.get("project", {}).get("dependencies", [])
-    for dep in deps:
-        if isinstance(dep, str) and dep.split("[", 1)[0].strip().startswith("litellm"):
-            errors.append(f"pyproject.toml dependency: {dep}")
+    errors.extend(
+        f"pyproject.toml dependency: {dep}"
+        for dep in deps
+        if isinstance(dep, str) and dep.split("[", 1)[0].strip().startswith("litellm")
+    )
     lock = ROOT / "uv.lock"
     if lock.exists() and 'name = "litellm"' in lock.read_text(encoding="utf-8"):
         errors.append("uv.lock still contains litellm")

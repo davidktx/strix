@@ -44,7 +44,9 @@ def test_extra_headers_applied_to_native_openai_client(monkeypatch: pytest.Monke
     monkeypatch.setenv("STRIX_LLM", "openai/some-model")
     monkeypatch.setenv("LLM_API_BASE", "https://gateway.example/v1")
     monkeypatch.setenv("LLM_API_KEY", "token")
-    monkeypatch.setenv("LLM_EXTRA_HEADERS", json.dumps({"X-Feature-Key": "svc", "X-Tenant": "acme"}))
+    monkeypatch.setenv(
+        "LLM_EXTRA_HEADERS", json.dumps({"X-Feature-Key": "svc", "X-Tenant": "acme"})
+    )
 
     configure_sdk_model_defaults(load_settings())
 

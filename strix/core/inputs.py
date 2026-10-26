@@ -245,7 +245,7 @@ def make_model_settings(
     model_name: str,
     force_required_tool_choice: bool = False,
     request_timeout: float | None = None,
-    prompt_cache: bool = True,
+    prompt_cache: bool = True,  # noqa: ARG001 - kept for caller compatibility
     extra_headers: dict[str, str] | None = None,
     extra_body: dict[str, Any] | None = None,
     has_tools: bool = True,

@@ -10,7 +10,6 @@ pairing so the trimmed history is still valid provider input.
 from __future__ import annotations
 
 import logging
-from functools import cache
 from typing import TYPE_CHECKING, Any
 
 from agents.model_settings import ModelSettings

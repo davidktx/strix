@@ -12,9 +12,9 @@ from uuid import uuid4
 
 from strix.config import codex
 from strix.config.loader import load_settings
+from strix.config.model_catalog import estimate_usage_cost
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.report.coverage import write_coverage
-from strix.config.model_catalog import estimate_usage_cost
 from strix.report.pricing import resolve_litellm_model
 from strix.report.sarif import write_sarif
 from strix.report.writer import (

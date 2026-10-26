@@ -12,7 +12,7 @@ CHECK_SCRIPT = ROOT / "scripts" / "check_no_litellm.py"
 
 
 def test_check_no_litellm_script_passes() -> None:
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603 - fixed local script, no user input
         [sys.executable, str(CHECK_SCRIPT)],
         cwd=ROOT,
         capture_output=True,

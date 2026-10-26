@@ -101,5 +101,7 @@ def test_resolver_does_not_guess_between_differently_priced_providers() -> None:
 
 
 def test_estimate_usage_cost_uses_catalog_rates() -> None:
-    cost = estimate_usage_cost(model="deepseek/deepseek-v4-flash", prompt_tokens=1000, completion_tokens=200)
+    cost = estimate_usage_cost(
+        model="deepseek/deepseek-v4-flash", prompt_tokens=1000, completion_tokens=200
+    )
     assert cost is not None and cost > 0
