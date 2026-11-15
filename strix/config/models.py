@@ -5,11 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
-import json
 import logging
 import os
 import time
-import uuid
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, cast
 
@@ -41,6 +39,7 @@ from openai.types.shared import Reasoning
 from strix.agents.prompt import CACHE_POINT
 from strix.config import codex
 from strix.config.loader import load_settings
+from strix.config.model_catalog import catalog_entry as _catalog_entry
 from strix.config.tool_call_arguments import repair_input
 from strix.config.tool_call_ids import TurnCallIdRewriter, dedupe_input
 from strix.config.tool_call_limits import TurnToolCallLimiter
@@ -538,36 +537,16 @@ def _response_usage(usage: Usage | None) -> ResponseUsage | None:
     )
 
 
-class _CredentialedLitellmProvider(ModelProvider):
-    """LiteLLM route bound to one endpoint's credentials.
-
-    ``LitellmProvider`` reads them from the process-wide LiteLLM globals, which
-    belong to the main model; a secondary endpoint needs its own.
-    """
-
-    def __init__(self, api_key: str | None, base_url: str | None) -> None:
-        self._api_key = api_key
-        self._base_url = base_url
-
-    def get_model(self, model_name: str | None) -> Model:
-        from agents.extensions.models.litellm_model import LitellmModel
-        from agents.models.default_models import get_default_model
-
-        return LitellmModel(
-            model=model_name or get_default_model(),
-            api_key=self._api_key,
-            base_url=self._base_url,
-        )
-
-
 class StrixProvider(MultiProvider):
-    """Route any non-OpenAI prefix through LiteLLM with the prefix preserved,
-    so users type ``deepseek/deepseek-chat`` rather than
-    ``litellm/deepseek/deepseek-chat``.
+    """Resolve every model through the SDK's OpenAI-compatible client.
 
-    ``api_key``/``base_url`` bind every route this provider resolves to one
-    endpoint, for a secondary model (the dedupe judge) whose endpoint differs
-    from the main model's process-wide defaults.
+    Provider-prefixed names (``openrouter/...``, ``deepseek/...``) are passed
+    through as literal model IDs when the prefix is not ``openai/``. Legacy
+    ``litellm/`` and ``ollama/`` prefixes are stripped. Set ``LLM_API_BASE``
+    and ``LLM_API_KEY`` for OpenAI, OpenRouter, Ollama, or any compatible API.
+
+    ``api_key``/``base_url`` bind this provider instance to one endpoint (e.g.
+    the dedupe judge).
     """
 
     def __init__(
@@ -580,18 +559,12 @@ class StrixProvider(MultiProvider):
         super().__init__(
             openai_api_key=api_key,
             openai_base_url=base_url,
-            # A custom endpoint is OpenAI-compatible, i.e. chat completions; the
-            # global default is the main model's and may say otherwise.
             openai_use_responses=False if base_url else None,
+            unknown_prefix_mode="model_id",
             **kwargs,
         )
         self._override_api_key = api_key
         self._override_base_url = base_url
-
-    def _create_fallback_provider(self, prefix: str) -> ModelProvider:
-        if prefix == "litellm" and (self._override_api_key or self._override_base_url):
-            return _CredentialedLitellmProvider(self._override_api_key, self._override_base_url)
-        return super()._create_fallback_provider(prefix)
 
     def _resolve_prefixed_model(
         self,
@@ -600,27 +573,26 @@ class StrixProvider(MultiProvider):
         prefix: str,
         stripped_model_name: str | None,
     ) -> tuple[ModelProvider, str | None]:
-        if prefix in {"openai", "litellm", "any-llm"}:
-            return super()._resolve_prefixed_model(
-                original_model_name=original_model_name,
-                prefix=prefix,
-                stripped_model_name=stripped_model_name,
-            )
-        if prefix == "ollama" and stripped_model_name:
-            return self._get_fallback_provider("litellm"), f"ollama_chat/{stripped_model_name}"
-        return self._get_fallback_provider("litellm"), original_model_name
+        lowered = prefix.lower()
+        if lowered == "litellm" and stripped_model_name:
+            return self.openai_provider, stripped_model_name
+        if lowered == "any-llm" and stripped_model_name:
+            return self.openai_provider, stripped_model_name
+        if lowered == "ollama" and stripped_model_name:
+            return self.openai_provider, stripped_model_name
+        return super()._resolve_prefixed_model(
+            original_model_name=original_model_name,
+            prefix=prefix,
+            stripped_model_name=stripped_model_name,
+        )
 
     def get_model(self, model_name: str | None) -> Model:
         llm = load_settings().llm
         slug = codex.subscription_model(model_name)
-        # The settings use 0 for no bound.
         idle_timeout = float(llm.stream_idle_timeout) or None
         first_event_timeout = float(llm.stream_first_event_timeout) or None
         total_timeout = float(llm.stream_total_timeout) or None
         if slug:
-            # The ChatGPT subscription backend is always streamed; it has no
-            # non-streaming mode to fall back to, so LLM_DISABLE_STREAMING
-            # does not apply here.
             model: Model = request_log.RequestLoggingModel(
                 _CodexResponsesModel(
                     slug,
@@ -634,29 +606,14 @@ class StrixProvider(MultiProvider):
         else:
             model = super().get_model(model_name)
             resolved_name = model_name or llm.model or "unknown"
-            if _routes_via_litellm(model):
-                # LiteLLM's callbacks log every reply; only a cancelled attempt
-                # (stream idle timeout, abandoned turn) escapes them.
-                model = request_log.RequestLoggingModel(
-                    model,
-                    model_name=resolved_name,
-                    provider=_litellm_provider(resolved_name),
-                    base_url=self._override_base_url or llm.api_base,
-                    route="litellm",
-                    abandoned_only=True,
-                )
-            else:
-                model = request_log.RequestLoggingModel(
-                    model,
-                    model_name=resolved_name,
-                    provider="openai",
-                    base_url=self._override_base_url or llm.api_base,
-                )
+            model = request_log.RequestLoggingModel(
+                model,
+                model_name=resolved_name,
+                provider=_infer_provider_name(resolved_name),
+                base_url=self._override_base_url or llm.api_base,
+            )
             if llm.disable_streaming:
                 model = _NonStreamingModel(model)
-                # The wrapper emits its single event only once the whole request
-                # is done, so an idle gap is meaningless here; the request
-                # timeout bounds it instead.
                 idle_timeout = first_event_timeout = total_timeout = None
         return _TurnGuardModel(
             model,
@@ -667,21 +624,14 @@ class StrixProvider(MultiProvider):
         )
 
 
-def _routes_via_litellm(model: Model) -> bool:
-    """LiteLLM-backed models are captured by the LiteLLM callback, not the wrapper."""
-    from agents.extensions.models.litellm_model import LitellmModel
-
-    return isinstance(model, LitellmModel)
-
-
-def _litellm_provider(model_name: str) -> str | None:
-    """The provider LiteLLM will route ``model_name`` to, if it can tell."""
-    try:
-        import litellm
-
-        return str(litellm.get_llm_provider(model_name)[1])
-    except Exception:  # noqa: BLE001 - unknown model ids are the provider's problem, not the log's
-        return None
+def _infer_provider_name(model_name: str) -> str:
+    entry = _catalog_entry(model_name)
+    if entry and entry.get("provider"):
+        return str(entry["provider"])
+    bare = _bare_openai_name(model_name)
+    if "/" in bare:
+        return bare.split("/", 1)[0]
+    return "openai"
 
 
 DEFAULT_MODEL_RETRY = ModelRetrySettings(
@@ -712,15 +662,10 @@ def configure_sdk_model_defaults(settings: Settings) -> None:
         request_log.register_sink(record_llm_request)
     if codex.subscription_model(llm.model):
         return
-    _configure_litellm_compatibility()
-    _configure_openrouter_attribution(llm.model)
     if llm.api_key:
         set_default_openai_key(llm.api_key, use_for_tracing=False)
-        _configure_litellm_default("api_key", llm.api_key)
-        _mirror_api_key_to_provider_env(llm.model, llm.api_key)
     if llm.api_base:
         os.environ["OPENAI_BASE_URL"] = llm.api_base
-        _configure_litellm_default("api_base", llm.api_base)
     configure_sdk_api_route(llm.model or "", settings)
     _configure_extra_headers(llm)
 
@@ -738,9 +683,8 @@ _RESPONSES_ENDPOINT = "/v1/responses"
 def resolve_api_type(model_name: str, settings: Settings) -> ApiType:
     """The SDK-native OpenAI route for ``model_name``: Responses or chat completions.
 
-    An explicit ``STRIX_API_TYPE`` wins. Otherwise the model decides: Responses
-    when LiteLLM's catalog lists ``/v1/responses`` for it, chat completions for
-    everything else.
+    An explicit ``STRIX_API_TYPE`` wins. Otherwise the built-in catalog lists
+    ``/v1/responses`` when supported; everything else uses chat completions.
     """
     if settings.llm.api_type is not None:
         return settings.llm.api_type
@@ -755,135 +699,6 @@ def _catalog_supported_endpoints(model_name: str) -> list[str]:
     return [str(e) for e in endpoints] if isinstance(endpoints, list) else []
 
 
-def _mirror_api_key_to_provider_env(model_name: str | None, api_key: str) -> None:
-    if not model_name:
-        return
-    import litellm
-
-    name = model_name.strip()
-    for prefix in ("litellm/", "any-llm/"):
-        if name.lower().startswith(prefix):
-            name = name[len(prefix) :]
-            break
-    try:
-        report = litellm.validate_environment(model=name.lower())
-    except Exception:  # noqa: BLE001
-        return
-    for env_key in report.get("missing_keys") or []:
-        if env_key.endswith("_API_KEY"):
-            os.environ.setdefault(env_key, api_key)
-
-
-def _configure_litellm_compatibility() -> None:
-    """Apply LiteLLM compatibility, privacy, and callback settings."""
-    import litellm
-
-    litellm.drop_params = True
-    litellm.modify_params = True
-    litellm.turn_off_message_logging = True
-    # Strix uses LiteLLM's success callback to capture provider-reported cost.
-    # Disabling streaming logging also disables that callback for streamed calls.
-    litellm.disable_streaming_logging = False
-    litellm.suppress_debug_info = True
-
-    _register_litellm_cost_callback()
-    _install_openrouter_stream_cost_capture()
-
-
-# Agent ids are 8 hex characters and can repeat across runs; the session id
-# OpenRouter pins a provider to must not, so each agent gets its own UUID.
-_OPENROUTER_SESSION_IDS: dict[str, str] = {}
-
-
-def _install_openrouter_stream_cost_capture() -> None:
-    """Preserve OpenRouter's per-stream cost, which LiteLLM drops when streaming.
-
-    OpenRouter reports the real charge in ``usage.cost`` of the final stream
-    chunk, but LiteLLM rebuilds streamed responses from token-only fields and
-    discards it (its non-streamed path stashes the cost in hidden params; the
-    streaming path does not). Every scan streams, so without this the cost is
-    lost and Strix falls back to a cost-map estimate that is missing entirely
-    for new models (e.g. kimi-k3), reporting $0. Subclass the OpenRouter
-    streaming handler to record the cost keyed by response id so the cost
-    callback can recover the exact charge for the matching rebuilt response.
-    """
-    import litellm
-    from litellm.llms.openrouter.chat.transformation import (
-        OpenRouterChatCompletionStreamingHandler,
-        OpenrouterConfig,
-    )
-
-    from strix.report.state import record_openrouter_provider, streamed_openrouter_costs
-
-    class _StrixOpenRouterStreamingHandler(OpenRouterChatCompletionStreamingHandler):
-        def chunk_parser(self, chunk: dict[str, Any]) -> Any:
-            # Before parsing: LiteLLM raises on an error chunk and drops its
-            # top-level ``provider``.
-            request_log.record_upstream_provider(
-                chunk.get("provider"), _openrouter_error_type(chunk.get("error"))
-            )
-            stream = super().chunk_parser(chunk)
-            usage = chunk.get("usage")
-            response_id = chunk.get("id") or getattr(stream, "id", None)
-            streamed_openrouter_costs.remember(response_id, usage)
-            if usage:
-                record_openrouter_provider(chunk.get("provider"), usage)
-            return stream
-
-    class _StrixOpenrouterConfig(OpenrouterConfig):
-        def get_model_response_iterator(
-            self, streaming_response: Any, sync_stream: bool, json_mode: bool | None = False
-        ) -> Any:
-            return _StrixOpenRouterStreamingHandler(
-                streaming_response=streaming_response,
-                sync_stream=sync_stream,
-                json_mode=json_mode,
-            )
-
-        def get_error_class(self, error_message: str, status_code: int, headers: Any) -> Any:
-            # A non-2xx reply names the provider in ``error.metadata``.
-            with contextlib.suppress(Exception):
-                error = json.loads(error_message)["error"]
-                request_log.record_upstream_provider(
-                    error["metadata"].get("provider_name"), _openrouter_error_type(error)
-                )
-            return super().get_error_class(error_message, status_code, headers)
-
-        def transform_response(self, *args: Any, **kwargs: Any) -> Any:
-            # Non-streamed replies (LLM_DISABLE_STREAMING) skip the chunk parser.
-            response = super().transform_response(*args, **kwargs)
-            raw_response = kwargs.get("raw_response", args[1] if len(args) > 1 else None)
-            with contextlib.suppress(Exception):
-                body = raw_response.json()  # type: ignore[union-attr]
-                request_log.record_upstream_provider(body.get("provider"))
-                if body.get("usage"):
-                    record_openrouter_provider(body.get("provider"), body["usage"])
-            return response
-
-        def transform_request(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-            # Pin each agent's calls to one upstream provider so its prompt cache
-            # survives between turns.
-            body = super().transform_request(*args, **kwargs)
-            agent_id = request_log.current_call_context().agent_id
-            if agent_id and load_settings().llm.openrouter_sticky_sessions:
-                session_id = _OPENROUTER_SESSION_IDS.setdefault(agent_id, str(uuid.uuid4()))
-                body.setdefault("session_id", session_id)
-            return body
-
-    # LiteLLM's provider-config factory reads litellm.OpenrouterConfig at call
-    # time, so overriding the attribute is enough for the subclass to take
-    # effect. (type: ignore — mypy rejects reassigning a class attribute.)
-    litellm.OpenrouterConfig = _StrixOpenrouterConfig  # type: ignore[misc]
-
-
-def _openrouter_error_type(error: object) -> object:
-    if isinstance(error, dict):
-        metadata = error.get("metadata")
-        if isinstance(metadata, dict):
-            return metadata.get("error_type")
-    return None
-
-
 OPENROUTER_ATTRIBUTION_HEADERS = {
     "HTTP-Referer": "https://strix.ai",
     "X-Title": "Strix",
@@ -895,45 +710,16 @@ def is_openrouter_model(model_name: str | None) -> bool:
     return bool(model_name) and "openrouter/" in (model_name or "").strip().lower()
 
 
-def _configure_openrouter_attribution(model_name: str | None) -> None:
-    import litellm
-
-    current: object = litellm.headers
-    existing: dict[str, str] = current if isinstance(current, dict) else {}
-    if not is_openrouter_model(model_name):
-        if any(key in existing for key in OPENROUTER_ATTRIBUTION_HEADERS):
-            remaining = {
-                k: v for k, v in existing.items() if k not in OPENROUTER_ATTRIBUTION_HEADERS
-            }
-            litellm.headers = remaining or None  # type: ignore[assignment]
-        return
-
-    litellm.headers = {**existing, **OPENROUTER_ATTRIBUTION_HEADERS}  # type: ignore[assignment]
-
-
 def _configure_extra_headers(llm: LlmSettings) -> None:
-    """Send user-provided default headers on every LLM request.
-
-    Some OpenAI-compatible endpoints require extra HTTP headers (e.g. request
-    attribution or tenant routing) alongside the bearer token. Users supply
-    them via ``LLM_EXTRA_HEADERS``; they are applied to both routing paths:
-    the LiteLLM route (``litellm.headers``) and the SDK-native OpenAI route
-    (a default client carrying ``default_headers``), so they take effect
-    regardless of the ``STRIX_LLM`` prefix.
-    """
-    headers = llm.extra_headers
+    """Send default HTTP headers on every OpenAI-compatible LLM request."""
+    headers: dict[str, str] = {}
+    if is_openrouter_model(llm.model):
+        headers.update(OPENROUTER_ATTRIBUTION_HEADERS)
+    if llm.extra_headers:
+        headers.update(llm.extra_headers)
     if not headers:
         return
-    _merge_litellm_headers(headers)
     _register_openai_client_with_headers(llm, headers)
-
-
-def _merge_litellm_headers(headers: dict[str, str]) -> None:
-    import litellm
-
-    current: object = litellm.headers
-    existing: dict[str, str] = current if isinstance(current, dict) else {}
-    litellm.headers = {**existing, **headers}  # type: ignore[assignment]
 
 
 def _register_openai_client_with_headers(llm: LlmSettings, headers: dict[str, str]) -> None:
@@ -950,27 +736,6 @@ def _register_openai_client_with_headers(llm: LlmSettings, headers: dict[str, st
         http_client=shared_http_client(),
     )
     set_default_openai_client(client, use_for_tracing=False)
-
-
-def _register_litellm_cost_callback() -> None:
-    import litellm
-
-    from strix.report.state import litellm_cost_callback
-
-    for bucket_name in ("success_callback", "_async_success_callback"):
-        bucket = getattr(litellm, bucket_name, None)
-        if not isinstance(bucket, list):
-            continue
-        if litellm_cost_callback in bucket:
-            continue
-        bucket.append(litellm_cost_callback)
-
-
-def _configure_litellm_default(name: str, value: str) -> None:
-    """Set LiteLLM's module-level defaults without adding a provider wrapper."""
-    import litellm
-
-    setattr(litellm, name, value)
 
 
 def uses_chat_completions_tool_schema(model_name: str, settings: Settings) -> bool:
@@ -1014,25 +779,12 @@ def _bare_openai_name(model_name: str) -> str:
     return name
 
 
-def _catalog_entry(model_name: str) -> dict[str, Any] | None:
-    """LiteLLM's cost-map entry for the model, looked up as it would route it."""
-    import litellm
-
-    name = _bare_openai_name(model_name)
-    entry = litellm.model_cost.get(name)
-    if entry is None and "/" in name:
-        entry = litellm.model_cost.get(name.rsplit("/", 1)[1])
-    return entry if isinstance(entry, dict) else None
-
-
 def is_known_openai_bare_model(model_name: str) -> bool:
-    import litellm
-
     name = model_name.strip().lower()
     if not name or "/" in name:
         return False
-    entry = litellm.model_cost.get(name)
-    return bool(entry and entry.get("litellm_provider") == "openai")
+    entry = _catalog_entry(name)
+    return bool(entry and entry.get("provider") == "openai")
 
 
 _ANTHROPIC_MODEL_MARKERS = ("anthropic", "claude", "sonnet", "opus", "haiku")
@@ -1042,20 +794,9 @@ def is_claude_model(model_name: str) -> bool:
     return "claude" in (model_name or "").strip().lower()
 
 
-def routes_through_litellm(model_name: str | None) -> bool:
-    """Whether :class:`StrixProvider` sends this model through LiteLLM.
-
-    Bare names and the ``openai/``/``any-llm/`` prefixes are served by the SDK's
-    own clients, which raise ``TypeError`` on request fields they do not know,
-    so LiteLLM-only fields must not be attached there. A bare ``claude-...``
-    name is exactly that case: an ``LLM_API_BASE`` pointing at an
-    OpenAI-compatible gateway in front of Claude.
-    """
-    name = (model_name or "").strip()
-    if not name or codex.subscription_model(name):
-        return False
-    prefix, _, rest = name.partition("/")
-    return bool(rest) and prefix.lower() not in {"openai", "any-llm"}
+def routes_through_litellm(_model_name: str | None) -> bool:
+    """Legacy helper; all models use the OpenAI-compatible SDK route now."""
+    return False
 
 
 def is_bedrock_route(model_name: str) -> bool:
@@ -1080,17 +821,8 @@ def _prompt_cache_name_candidates(model_name: str) -> list[str]:
 
 
 def bedrock_route_supports_prompt_caching(model_name: str) -> bool:
-    # Bedrock rejects the cache marker for models LiteLLM's map doesn't
-    # recognise as cache-capable, so callers withhold it unless confirmed here.
-    import litellm
-
-    checker = getattr(getattr(litellm, "utils", None), "supports_prompt_caching", None)
     for cand in _prompt_cache_name_candidates(model_name):
-        if checker is not None:
-            with contextlib.suppress(Exception):
-                if checker(cand):
-                    return True
-        entry = litellm.model_cost.get(cand)
+        entry = _catalog_entry(cand)
         if entry and entry.get("supports_prompt_caching"):
             return True
     return False

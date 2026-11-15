@@ -53,7 +53,6 @@ _NOISY_LIBS: tuple[str, ...] = (
     "httpx",
     "httpcore",
     "urllib3",
-    "litellm",
     "openai",
     "anthropic",
 )
@@ -91,11 +90,6 @@ def _silence_pty_threshold_warning() -> None:
 
 def configure_dependency_logging() -> None:
     """Quiet dependency logging/warnings that obscure Strix scan logs."""
-    litellm = sys.modules.get("litellm")
-    if litellm is not None:
-        with contextlib.suppress(Exception):
-            litellm._logging._disable_debugging()
-
     logging.getLogger("asyncio").setLevel(logging.CRITICAL)
     logging.getLogger("asyncio").propagate = False
     warnings.filterwarnings("ignore", category=RuntimeWarning, module="asyncio")

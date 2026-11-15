@@ -29,7 +29,8 @@ def test_dedupe_key_bound_to_model_client_not_global_env() -> None:
     # main key can't clobber it (and vice versa) through the process globals —
     # and it never rides on the request, where every model implementation's own
     # api_key kwarg would collide with it.
-    assert model.api_key == "dedupe-key"  # type: ignore[attr-defined]
+    client = model._client  # type: ignore[attr-defined]
+    assert client.api_key == "dedupe-key"
 
 
 def test_dedupe_settings_carry_no_request_credentials() -> None:
@@ -55,10 +56,14 @@ def test_dedupe_endpoint_bound_to_model_client() -> None:
     assert str(client.base_url).startswith("https://dedupe.example/v1")
 
 
-def test_dedupe_without_credentials_uses_default_provider() -> None:
+def test_dedupe_without_credentials_uses_default_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     dedupe = DedupeSettings(STRIX_DEDUPE_MODEL="deepseek/cheap")
     model = _unwrap(resolve_dedupe_model(dedupe, "deepseek/cheap"))
-    assert model.api_key is None  # type: ignore[attr-defined]
+    client = model._client  # type: ignore[attr-defined]
+    assert client.api_key == "test-key"
 
 
 def test_dedicated_dedupe_model_uses_own_headers_not_main() -> None:

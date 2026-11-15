@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import litellm
 import pytest
-from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
 from agents.models import _openai_shared
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_responses import OpenAIResponsesModel
 
 from strix.config import models
+from strix.config.model_catalog import catalog_entries
 from strix.config.models import (
     StrixProvider,
     _NonStreamingModel,
@@ -33,8 +32,6 @@ def test_request_timeout_extra_args_positive() -> None:
 
 
 def test_request_timeout_extra_args_survives_model_settings_json_dump() -> None:
-    """The Chat Completions and LiteLLM paths pydantic-serialize ModelSettings for
-    their tracing span; a non-JSON-serializable timeout fails every turn there."""
     settings = ModelSettings(extra_args=request_timeout_extra_args(300))
     assert settings.to_json_dict()["extra_args"] == {"timeout": 300}
 
@@ -66,38 +63,38 @@ def test_other_routes_keep_strict_tool_schemas(model_name: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("model_name", "litellm"),
+    "model_name",
     [
-        ("claude-sonnet-4-5", False),
-        ("openai/claude-sonnet-4-5", False),
-        ("any-llm/anthropic/claude-sonnet-4-5", False),
-        ("anthropic/claude-sonnet-4-5", True),
-        ("litellm/anthropic/claude-sonnet-4-5", True),
-        ("bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0", True),
-        ("ollama/llama3", True),
+        "claude-sonnet-4-5",
+        "openai/claude-sonnet-4-5",
+        "any-llm/anthropic/claude-sonnet-4-5",
+        "anthropic/claude-sonnet-4-5",
+        "litellm/anthropic/claude-sonnet-4-5",
+        "bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "ollama/llama3",
     ],
 )
-def test_routes_through_litellm_matches_the_provider(
-    monkeypatch: pytest.MonkeyPatch, model_name: str, litellm: bool
-) -> None:
-    """The helper must agree with what StrixProvider actually builds.
+def test_routes_through_litellm_is_always_false(model_name: str) -> None:
+    assert routes_through_litellm(model_name) is False
 
-    Callers use it to decide whether a LiteLLM-only request field is safe to
-    attach; on the SDK's own clients such a field raises TypeError mid-turn, so
-    drift here breaks every request on that route.
-    """
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "anthropic/claude-sonnet-4-5",
+        "openrouter/z-ai/glm-5.3",
+        "litellm/openai/gpt-4o",
+    ],
+)
+def test_strix_provider_uses_openai_compatible_sdk(
+    monkeypatch: pytest.MonkeyPatch, model_name: str
+) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    assert routes_through_litellm(model_name) is litellm
-    try:
-        model = StrixProvider().get_model(model_name)
-    except ImportError:
-        # any-llm's client is an optional dependency; reaching it at all already
-        # proves the route is not LiteLLM's.
-        assert not litellm
-        return
+    monkeypatch.setenv("LLM_API_BASE", "https://gateway.example/v1")
+    model = StrixProvider().get_model(model_name)
     while isinstance(model, _NonStreamingModel | _TurnGuardModel | RequestLoggingModel):
         model = model._inner
-    assert isinstance(model, LitellmModel) is litellm
+    assert isinstance(model, OpenAIChatCompletionsModel | OpenAIResponsesModel)
 
 
 def test_api_type_override_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -126,8 +123,6 @@ def test_api_type_overrides_the_api_base_route(
     monkeypatch.setattr(_openai_shared, "_use_responses_by_default", True)
     monkeypatch.setattr(_openai_shared, "_default_openai_client", None)
     monkeypatch.setattr(_openai_shared, "_default_openai_key", None)
-    monkeypatch.setattr(litellm, "api_key", None)
-    monkeypatch.setattr(litellm, "api_base", None)
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "")
     monkeypatch.setenv("STRIX_LLM", "gpt-5")
@@ -159,7 +154,6 @@ def _settings(monkeypatch: pytest.MonkeyPatch, model: str, api_base: str | None)
 def test_resolve_api_type_follows_the_catalog_not_the_base_url(
     monkeypatch: pytest.MonkeyPatch, api_base: str | None
 ) -> None:
-    """Responses when LiteLLM lists /v1/responses for the model, chat completions otherwise."""
     settings = _settings(monkeypatch, "gpt-5", api_base)
     for model in ("gpt-5", "gpt-5.6-sol", "openai/gpt-5.4", "gpt-daybreak-blue-latest"):
         assert resolve_api_type(model, settings) == "responses", model
@@ -194,7 +188,6 @@ def test_reasoning_effort_is_case_insensitive(
 def test_configure_sdk_api_route_follows_the_given_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``model=`` override picks its own route, not ``STRIX_LLM``'s."""
     routes: list[str] = []
     monkeypatch.setattr(models, "set_default_openai_api", routes.append)
     settings = _settings(monkeypatch, "gpt-5", "https://gateway.example/v1")
@@ -205,9 +198,14 @@ def test_configure_sdk_api_route_follows_the_given_model(
     assert routes == ["responses", "chat_completions"]
 
 
-def test_image_support_follows_the_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(litellm.model_cost, "acme-text", {})
-    monkeypatch.setitem(litellm.model_cost, "acme-vision", {"supports_vision": True})
-    assert model_supports_images("acme-text") is False
-    assert model_supports_images("litellm/openai/acme-vision") is True
-    assert model_supports_images("acme-unknown-model") is True
+def test_image_support_follows_the_catalog() -> None:
+    entries = catalog_entries()
+    entries["acme-text"] = {"supports_vision": False}
+    entries["acme-vision"] = {"supports_vision": True}
+    try:
+        assert model_supports_images("acme-text") is False
+        assert model_supports_images("litellm/openai/acme-vision") is True
+        assert model_supports_images("acme-unknown-model") is True
+    finally:
+        entries.pop("acme-text", None)
+        entries.pop("acme-vision", None)

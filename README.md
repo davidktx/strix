@@ -303,6 +303,25 @@ export LLM_API_KEY="your-api-key"
 export LLM_API_BASE="your-api-base-url"  # if using a local model, e.g. Ollama, LMStudio
 ```
 
+#### Models without LiteLLM
+
+This fork routes **all** models through the OpenAI Agents SDK's OpenAI-compatible client (`openai` Python package). There is no LiteLLM dependency. Configure any provider that exposes an OpenAI-compatible HTTP API:
+
+| Goal | Example |
+| --- | --- |
+| OpenAI | `STRIX_LLM=gpt-5.4` and `LLM_API_KEY=sk-...` (default base URL) |
+| OpenRouter | `STRIX_LLM=openrouter/z-ai/glm-5.3`, `LLM_API_KEY=sk-or-...`, `LLM_API_BASE=https://openrouter.ai/api/v1` |
+| Ollama (local) | `STRIX_LLM=llama3.2`, `LLM_API_BASE=http://127.0.0.1:11434/v1`, `LLM_API_KEY=ollama` |
+| Custom gateway | `STRIX_LLM=my-vendor/model-id` with your gateway's base URL and API key |
+
+Optional tuning:
+
+- `STRIX_API_TYPE=responses` or `chat_completions` — force the SDK API shape when auto-detection is wrong.
+- `LLM_EXTRA_HEADERS` — JSON object of extra HTTP headers (OpenRouter attribution is added automatically when the model name contains `openrouter/`).
+- `STRIX_OPENROUTER_STICKY_SESSIONS=true` — send OpenRouter `session_id` per agent (via `extra_body`).
+
+Provider-prefixed names such as `anthropic/claude-sonnet-4-6` are sent as literal model IDs to your configured base URL (typical for OpenRouter or private gateways). Native AWS Bedrock / Vertex SDK routing is not included in this fork; point `LLM_API_BASE` at an OpenAI-compatible proxy instead.
+
 > [!NOTE]
 > Strix automatically saves your configuration to `~/.strix/cli-config.json`, so you don't have to re-enter it on every run.
 > See the [configuration reference](https://docs.strix.ai/advanced/configuration) for every environment variable.
@@ -359,7 +378,7 @@ Each server's tools are namespaced by `name`, for example `github_list_issues`. 
 - [DeepSeek V4 Pro](https://platform.deepseek.com) - `deepseek/deepseek-v4-pro`
 - [Moonshot Kimi K3](https://platform.kimi.ai) - `moonshot/kimi-k3`
 
-See the [LLM Providers documentation](https://docs.strix.ai/llm-providers/overview) for all supported providers including Vertex AI, Bedrock, Azure, and local models.
+Upstream Strix documents additional providers in the [LLM Providers overview](https://docs.strix.ai/llm-providers/overview); in this fork, use an OpenAI-compatible endpoint for each provider you need.
 
 ## Documentation
 
@@ -379,7 +398,7 @@ Have questions? Found a bug? Want to contribute? **[Join our Discord!](https://d
 
 ## Acknowledgements
 
-Strix builds on the incredible work of open-source projects like [LiteLLM](https://github.com/BerriAI/litellm), [Caido](https://github.com/caido/caido), [Nuclei](https://github.com/projectdiscovery/nuclei), [Playwright](https://github.com/microsoft/playwright), and [Bubble Tea](https://github.com/charmbracelet/bubbletea). Huge thanks to their maintainers!
+Strix builds on the incredible work of open-source projects like [Caido](https://github.com/caido/caido), [Nuclei](https://github.com/projectdiscovery/nuclei), [Playwright](https://github.com/microsoft/playwright), and [Bubble Tea](https://github.com/charmbracelet/bubbletea). Huge thanks to their maintainers!
 
 
 > [!WARNING]

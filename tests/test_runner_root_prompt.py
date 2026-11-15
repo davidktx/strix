@@ -67,6 +67,7 @@ def _patch_engine_scaffold(
             extra_body=None,
         ),
         runtime=types.SimpleNamespace(max_context_images=3),
+        telemetry=types.SimpleNamespace(run_record_timings=False),
     )
     monkeypatch.setattr(runner, "load_settings", lambda: settings)
     monkeypatch.setattr(runner, "configure_sdk_model_defaults", lambda _settings: None)
@@ -329,7 +330,7 @@ async def test_text_only_load_skill_drops_screenshot_guidance() -> None:
     assert "text-only model" in out
 
 
-def test_scope_is_sent_as_its_own_system_message_on_cache_point_routes() -> None:
+def test_scope_stays_in_the_system_prompt_without_litellm_cache_split() -> None:
     settings = make_model_settings(None, model_name="anthropic/claude-sonnet-5-5")
     prompt = render_system_prompt(
         system_prompt_context={
@@ -339,12 +340,10 @@ def test_scope_is_sent_as_its_own_system_message_on_cache_point_routes() -> None
 
     system, model_input = _split_cached_prefix(prompt, "go", settings)
 
-    assert system is None
-    assert isinstance(model_input, list)
-    assert [item["role"] for item in model_input] == ["system", "system", "user"]
-    assert "https://target.invalid" not in model_input[0]["content"]
-    assert "https://target.invalid" in model_input[1]["content"]
-    assert "<cache_point>" not in model_input[0]["content"] + model_input[1]["content"]
+    assert system is not None
+    assert "https://target.invalid" in system
+    assert model_input == "go"
+    assert "<cache_point>" not in system
 
 
 def test_cache_point_marker_is_removed_without_cache_points() -> None:

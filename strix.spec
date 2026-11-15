@@ -39,20 +39,10 @@ for asset in viewer_static.rglob('*'):
 datas += collect_data_files('tiktoken')
 datas += collect_data_files('tiktoken_ext')
 
-datas += collect_data_files('litellm')
-
 datas += collect_data_files('agents', includes=['**/*.md', '**/*.jinja', '**/*.json'])
 
 hiddenimports = [
     # Core dependencies
-    'litellm',
-    'litellm.llms',
-    'litellm.llms.openai',
-    'litellm.llms.anthropic',
-    'litellm.llms.vertex_ai',
-    'litellm.llms.bedrock',
-    'litellm.utils',
-    'litellm.caching',
 
     # Rich console
     'rich',
@@ -179,7 +169,6 @@ hiddenimports = [
     'strix.skills',
 ]
 
-hiddenimports += collect_submodules('litellm')
 hiddenimports += collect_submodules('google.auth')
 hiddenimports += collect_submodules('google.oauth2')
 hiddenimports += collect_submodules('rich')

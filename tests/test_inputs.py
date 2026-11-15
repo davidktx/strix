@@ -5,7 +5,6 @@ from __future__ import annotations
 from itertools import pairwise
 from typing import Any
 
-import litellm
 import pytest
 
 from strix.core.inputs import (
@@ -67,44 +66,20 @@ def _cache_points(model_name: str) -> Any:
     return extra.get("cache_control_injection_points")
 
 
-def test_make_model_settings_enables_prompt_cache_for_bedrock_claude() -> None:
-    assert _cache_points("bedrock/global.anthropic.claude-opus-4-8") == [
-        {"location": "message", "role": "system"},
-        {"location": "message", "index": -1},
-    ]
-
-
 @pytest.mark.parametrize(
     "model_name",
     [
+        "bedrock/global.anthropic.claude-opus-4-8",
         "anthropic/claude-sonnet-4-5",
         "openrouter/anthropic/claude-3.5-sonnet",
         "vertex_ai/claude-sonnet-4-5",
+        "claude-sonnet-4-5",
+        "openai/claude-sonnet-4-5",
+        "any-llm/anthropic/claude-sonnet-4-5",
     ],
 )
-def test_make_model_settings_enables_prompt_cache_for_non_bedrock_claude(model_name: str) -> None:
-    assert _cache_points(model_name) == [
-        {"location": "message", "role": "system"},
-        {"location": "message", "index": -1},
-    ]
-
-
-@pytest.mark.parametrize(
-    "model_name",
-    ["claude-sonnet-4-5", "openai/claude-sonnet-4-5", "any-llm/anthropic/claude-sonnet-4-5"],
-)
-def test_no_prompt_cache_for_claude_off_the_litellm_route(model_name: str) -> None:
-    # These names are served by SDK clients that raise TypeError on LiteLLM-only
-    # request kwargs — e.g. a gateway in front of Claude reached with a bare name.
+def test_make_model_settings_does_not_inject_prompt_cache(model_name: str) -> None:
     assert _cache_points(model_name) is None
-
-
-def test_tool_config_point_not_leaked_to_non_bedrock_claude() -> None:
-    # LiteLLM only consumes tool_config on Bedrock; elsewhere it leaks onto the
-    # wire and native Anthropic 400s.
-    for model in ("anthropic/claude-sonnet-4-5", "openrouter/anthropic/claude-3.5-sonnet"):
-        points = _cache_points(model) or []
-        assert all(p.get("location") != "tool_config" for p in points)
 
 
 def test_prompt_cache_can_be_disabled() -> None:
@@ -121,63 +96,14 @@ def test_make_model_settings_no_prompt_cache_for_non_claude(model_name: str) -> 
     assert make_model_settings(None, model_name=model_name).extra_args is None
 
 
-def test_no_prompt_cache_for_unmapped_bedrock_claude_model(monkeypatch: Any) -> None:
-    # A Bedrock Claude model LiteLLM hasn't mapped must run uncached, not crash.
-    unmapped = "bedrock/global.anthropic.claude-brand-new-9"
-    monkeypatch.setattr(litellm, "model_cost", {}, raising=False)
-    if getattr(getattr(litellm, "utils", None), "supports_prompt_caching", None):
-        monkeypatch.setattr(litellm.utils, "supports_prompt_caching", lambda *_a, **_k: False)
-
-    assert make_model_settings(None, model_name=unmapped).extra_args is None
-
-
-def test_prompt_cache_kept_for_non_bedrock_claude_even_if_unmapped(monkeypatch: Any) -> None:
-    # Only Bedrock hard-rejects unknown cache fields, so only Bedrock is guarded.
-    monkeypatch.setattr(litellm, "model_cost", {}, raising=False)
-    if getattr(getattr(litellm, "utils", None), "supports_prompt_caching", None):
-        monkeypatch.setattr(litellm.utils, "supports_prompt_caching", lambda *_a, **_k: False)
-
-    for model in ("anthropic/claude-brand-new-9", "openrouter/anthropic/claude-brand-new"):
-        assert _cache_points(model) == [
-            {"location": "message", "role": "system"},
-            {"location": "message", "index": -1},
-        ]
-
-
 def test_max_reasoning_effort_sent_as_raw_body_field() -> None:
-    # "max" is absent from the OpenAI SDK's Reasoning enum, and LiteLLM's DeepSeek
-    # mapping collapses every effort to thinking-enabled, so it has to ride along
-    # as a raw body field to reach the provider.
+    # "max" is absent from the OpenAI SDK's Reasoning enum, so it rides as a raw body field.
     settings = make_model_settings(
         "max", model_name="deepseek/deepseek-v4-flash", request_timeout=30
     )
     assert settings.reasoning is None
     assert settings.extra_args == {"timeout": 30}
     assert settings.extra_body == {"reasoning_effort": "max"}
-
-
-def test_conversation_tail_breakpoint_moves_with_appended_transcript() -> None:
-    # LiteLLM must place the index=-1 cache_control on the last message however
-    # long the transcript grows.
-    hook_mod = pytest.importorskip("litellm.integrations.anthropic_cache_control_hook")
-    apply = hook_mod.AnthropicCacheControlHook._apply_message_injections
-    points = _cache_points("bedrock/global.anthropic.claude-opus-4-8")
-    msg_points = [p for p in points if p.get("location") == "message"]
-
-    def last_msg_cache_control(n_turns: int) -> Any:
-        messages: list[dict[str, Any]] = [{"role": "system", "content": "stable prompt"}]
-        for i in range(n_turns):
-            messages.append({"role": "assistant", "content": f"turn {i} action"})
-            messages.append({"role": "user", "content": f"turn {i} tool result"})
-        processed = apply(msg_points, messages, 4)
-        last = processed[-1]
-        content = last.get("content")
-        if isinstance(content, list):
-            return content[-1].get("cache_control")
-        return last.get("cache_control")
-
-    assert last_msg_cache_control(2) == {"type": "ephemeral"}
-    assert last_msg_cache_control(20) == {"type": "ephemeral"}
 
 
 def test_build_root_task_empty_config() -> None:
@@ -456,8 +382,7 @@ def test_scan_targets_drop_empty_and_duplicate_entries() -> None:
 
 
 def test_openrouter_attribution_rides_on_the_request_headers() -> None:
-    # litellm.headers is ignored once a request carries any header of its own,
-    # so the attribution must be part of the per-request headers.
+    # Attribution must be part of the per-request headers, not a global client default.
     headers = make_model_settings(
         None, model_name="openrouter/anthropic/claude-sonnet-4-5"
     ).extra_headers

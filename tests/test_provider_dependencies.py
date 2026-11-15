@@ -31,8 +31,6 @@ def test_provider_packages_are_regular_dependencies(package: str) -> None:
         "google.auth.transport.requests",
         "google.oauth2.service_account",
         "boto3",
-        "litellm.llms.vertex_ai.vertex_llm_base",
-        "litellm.llms.bedrock.base_aws_llm",
     ],
 )
 def test_provider_modules_import(module: str) -> None:

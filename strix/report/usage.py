@@ -8,6 +8,7 @@ from typing import Any
 from agents.usage import Usage, deserialize_usage, serialize_usage
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from strix.config.model_catalog import estimate_usage_cost
 from strix.report.pricing import resolve_litellm_model
 
 
@@ -70,7 +71,7 @@ class LLMUsageLedger:
             metadata["model"] = model
 
         if not self.zero_cost:
-            estimated = _estimate_litellm_cost(usage, model)
+            estimated = _estimate_catalog_cost(usage, model)
             if estimated:
                 self._estimated_cost += estimated
 
@@ -212,19 +213,19 @@ def _usage_has_activity(usage: Usage) -> bool:
     )
 
 
-def _estimate_litellm_cost(usage: Usage, model: str | None) -> float | None:
-    litellm_model = _litellm_model_name(model)
-    if not litellm_model:
+def _estimate_catalog_cost(usage: Usage, model: str | None) -> float | None:
+    pricing_model = _pricing_model_name(model)
+    if not pricing_model:
         return None
 
     entries = list(usage.request_usage_entries)
     if not entries:
-        return _estimate_litellm_entry_cost(usage, litellm_model)
+        return _estimate_catalog_entry_cost(usage, pricing_model)
 
     total = 0.0
     estimated_any = False
     for entry in entries:
-        cost = _estimate_litellm_entry_cost(entry, litellm_model)
+        cost = _estimate_catalog_entry_cost(entry, pricing_model)
         if cost is None:
             continue
         total += cost
@@ -233,7 +234,7 @@ def _estimate_litellm_cost(usage: Usage, model: str | None) -> float | None:
     return total if estimated_any else None
 
 
-def _estimate_litellm_entry_cost(entry: Any, model: str) -> float | None:
+def _estimate_catalog_entry_cost(entry: Any, model: str) -> float | None:
     prompt_tokens = _int_or_zero(getattr(entry, "input_tokens", 0))
     completion_tokens = _int_or_zero(getattr(entry, "output_tokens", 0))
     total_tokens = _int_or_zero(getattr(entry, "total_tokens", 0))
@@ -241,20 +242,6 @@ def _estimate_litellm_entry_cost(entry: Any, model: str) -> float | None:
         total_tokens = prompt_tokens + completion_tokens
     if total_tokens <= 0:
         return None
-
-    usage_payload: dict[str, Any] = {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": total_tokens,
-    }
-    prompt_details = _details_to_dict(getattr(entry, "input_tokens_details", None))
-    completion_details = _details_to_dict(getattr(entry, "output_tokens_details", None))
-    if prompt_details:
-        usage_payload["prompt_tokens_details"] = prompt_details
-    if completion_details:
-        usage_payload["completion_tokens_details"] = completion_details
-
-    from litellm import completion_cost
 
     candidates = [model]
     if "/" in model:
@@ -264,20 +251,18 @@ def _estimate_litellm_entry_cost(entry: Any, model: str) -> float | None:
         resolved = resolve_litellm_model(candidate)
         if not resolved:
             continue
-        try:
-            cost = completion_cost(
-                completion_response={"model": resolved, "usage": usage_payload},
-                model=resolved,
-            )
-        except Exception:  # nosec B112  # noqa: BLE001, S112
-            continue
-        if cost > 0:
+        cost = estimate_usage_cost(
+            model=resolved,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+        if cost is not None and cost > 0:
             return float(cost)
-    logger.debug("LiteLLM cost estimate unavailable for model %s", model)
+    logger.debug("Catalog cost estimate unavailable for model %s", model)
     return None
 
 
-def _litellm_model_name(model: str | None) -> str | None:
+def _pricing_model_name(model: str | None) -> str | None:
     if not model:
         return None
     normalized = model.strip()

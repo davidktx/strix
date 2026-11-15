@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
-import litellm
 import pytest
 from agents.items import ModelResponse
 from agents.models import _openai_shared
@@ -18,11 +15,6 @@ from agents.models.interface import Model
 from agents.models.openai_provider import shared_http_client
 from agents.tool import FunctionTool
 from agents.usage import Usage
-from litellm.exceptions import APIConnectionError as LiteLlmConnectionError
-from litellm.exceptions import APIError as LiteLlmApiError
-from litellm.exceptions import AuthenticationError as LiteLlmAuthenticationError
-from litellm.exceptions import Timeout as LiteLlmTimeout
-from litellm.llms.anthropic.common_utils import AnthropicError
 from openai import APIStatusError, APITimeoutError, PermissionDeniedError
 from openai.types.responses import Response, ResponseCompletedEvent, ResponseCreatedEvent
 from openai.types.responses.response import IncompleteDetails
@@ -60,67 +52,6 @@ def _reset_context() -> Iterator[None]:
         yield
     finally:
         request_log.reset_call_context(token)
-
-
-def _anthropic_kwargs(
-    exc: BaseException | None,
-    *,
-    headers: dict[str, str] | None = None,
-    stream: bool = False,
-    error_message: str | None = None,
-) -> dict[str, Any]:
-    slo: dict[str, Any] = {
-        "model": "claude-sonnet-4-5",
-        "custom_llm_provider": "anthropic",
-        "api_base": "https://api.anthropic.com",
-        "stream": stream,
-        "litellm_call_id": "call-1",
-        "hidden_params": {
-            "additional_headers": {f"llm_provider-{k}": v for k, v in (headers or {}).items()},
-            "response_cost": 0.0123,
-        },
-    }
-    if exc is not None:
-        slo["error_information"] = {
-            "error_code": str(getattr(exc, "status_code", "")),
-            "error_class": type(exc).__name__,
-            "llm_provider": "anthropic",
-            "error_message": error_message or str(exc),
-        }
-    kwargs: dict[str, Any] = {
-        "model": "anthropic/claude-sonnet-4-5",
-        "custom_llm_provider": "anthropic",
-        "litellm_call_id": "call-1",
-        "stream": stream,
-        "standard_logging_object": slo,
-        "litellm_params": {"api_base": "https://api.anthropic.com", "api_key": "sk-ant-secret"},
-        "messages": [{"role": "user", "content": "SECRET PROMPT"}],
-    }
-    if exc is not None:
-        kwargs["exception"] = exc
-    return kwargs
-
-
-@dataclass
-class _FakeUsage:
-    prompt_tokens: int = 120
-    completion_tokens: int = 30
-    total_tokens: int = 150
-    prompt_tokens_details: None = None
-    cache_read_input_tokens: int = 100
-
-
-class _FakeResponse:
-    id = "msg_01abc"
-    usage = _FakeUsage()
-    _hidden_params: ClassVar[dict[str, Any]] = {}
-    choices: ClassVar[list[Any]] = [{"message": {"content": "SECRET COMPLETION"}}]
-
-
-def _anthropic_error(
-    status: int, body: str, headers: dict[str, str] | None = None
-) -> AnthropicError:
-    return AnthropicError(status, body, headers=httpx.Headers(headers or {}))
 
 
 # --------------------------------------------------------------------------- #
@@ -172,153 +103,8 @@ def test_clean_error_message_truncates_and_keeps_the_text() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# LiteLLM route                                                                #
+# install / sinks                                                              #
 # --------------------------------------------------------------------------- #
-
-
-def test_litellm_success_event_carries_header_request_id_usage_and_no_content() -> None:
-    kwargs = _anthropic_kwargs(None, headers={"request-id": "req_ok_123456"})
-    kwargs["response_cost"] = 0.0123
-    start = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
-    end = start + timedelta(milliseconds=850)
-
-    event = request_log.event_from_litellm(kwargs, _FakeResponse(), start, end, outcome="success")
-
-    assert event.route == "litellm"
-    assert event.outcome == "success"
-    assert event.status_code == 200
-    assert event.provider == "anthropic"
-    assert event.model == "anthropic/claude-sonnet-4-5"
-    assert event.api_host == "api.anthropic.com"
-    assert event.provider_request_id == "req_ok_123456"
-    assert event.response_id == "msg_01abc"
-    assert event.call_id == "call-1"
-    assert event.duration_ms == 850
-    assert (event.input_tokens, event.output_tokens, event.total_tokens) == (120, 30, 150)
-    assert event.cached_input_tokens == 100
-    assert event.cost_usd == pytest.approx(0.0123)
-    assert event.error_type is None and event.error_message is None
-    serialized = str(event.to_dict())
-    assert "SECRET PROMPT" not in serialized
-    assert "SECRET COMPLETION" not in serialized
-    assert "sk-ant-secret" not in serialized
-
-
-def test_litellm_success_falls_back_to_response_hidden_headers() -> None:
-    kwargs = _anthropic_kwargs(None)
-
-    class _Response(_FakeResponse):
-        _hidden_params: ClassVar[dict[str, Any]] = {
-            "additional_headers": {"llm_provider-request-id": "req_hidden_1"}
-        }
-
-    event = request_log.event_from_litellm(kwargs, _Response(), None, None, outcome="success")
-    assert event.provider_request_id == "req_hidden_1"
-
-
-def test_litellm_anthropic_block_prefers_header_id_over_body_id() -> None:
-    exc = _anthropic_error(400, ANTHROPIC_BLOCK_BODY, {"request-id": "req_HeaderWins01"})
-    kwargs = _anthropic_kwargs(exc, headers={"request-id": "req_HeaderWins01"})
-
-    event = request_log.event_from_litellm(kwargs, None, None, None, outcome="error")
-
-    assert event.outcome == "error"
-    assert event.status_code == 400
-    assert event.provider_request_id == "req_HeaderWins01"
-    assert event.error_type == "AnthropicError"
-    assert event.error_message is not None
-    assert "content filtering policy" in event.error_message
-    assert "req_011CVBodyOnly00" in event.error_message
-
-
-def test_litellm_anthropic_block_falls_back_to_body_id() -> None:
-    exc = _anthropic_error(400, ANTHROPIC_BLOCK_BODY)
-    kwargs = _anthropic_kwargs(exc)
-
-    event = request_log.event_from_litellm(kwargs, None, None, None, outcome="error")
-
-    assert event.provider_request_id == "req_011CVBodyOnly00"
-    assert event.status_code == 400
-
-
-def test_litellm_failure_uses_exception_headers_when_slo_has_none() -> None:
-    exc = _anthropic_error(529, "overloaded", {"request-id": "req_from_exc_hdr"})
-    kwargs = _anthropic_kwargs(exc)
-
-    event = request_log.event_from_litellm(kwargs, None, None, None, outcome="error")
-
-    assert event.provider_request_id == "req_from_exc_hdr"
-    assert event.status_code == 529
-
-
-def test_litellm_failure_without_any_request_id_is_none_not_fabricated() -> None:
-    exc = _anthropic_error(500, "internal error")
-    event = request_log.event_from_litellm(
-        _anthropic_kwargs(exc), None, None, None, outcome="error"
-    )
-    assert event.provider_request_id is None
-    assert event.error_message == "internal error"
-
-
-def test_litellm_failure_without_exception_object_uses_error_information() -> None:
-    kwargs = _anthropic_kwargs(None)
-    kwargs["standard_logging_object"]["error_information"] = {
-        "error_code": "429",
-        "error_class": "RateLimitError",
-        "llm_provider": "anthropic",
-        "error_message": 'rate limited "request_id": "req_slo_only01"',
-    }
-    event = request_log.event_from_litellm(kwargs, None, None, None, outcome="error")
-    assert event.status_code == 429
-    assert event.error_type == "RateLimitError"
-    assert event.provider_request_id == "req_slo_only01"
-
-
-def test_litellm_timeout_is_an_error_event_with_no_status() -> None:
-    exc = APITimeoutError(httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
-    kwargs = _anthropic_kwargs(exc)
-    kwargs["standard_logging_object"]["error_information"]["error_code"] = ""
-    event = request_log.event_from_litellm(kwargs, None, None, None, outcome="error")
-    assert event.outcome == "error"
-    assert event.status_code is None
-    assert event.error_type == "APITimeoutError"
-    assert event.provider_request_id is None
-
-
-def test_litellm_failure_message_is_the_providers_text() -> None:
-    exc = _anthropic_error(401, "invalid x-api-key")
-    event = request_log.event_from_litellm(
-        _anthropic_kwargs(exc), None, None, None, outcome="error"
-    )
-    assert event.error_message is not None
-    assert "invalid x-api-key" in event.error_message
-
-
-def test_litellm_streaming_flag_and_call_id() -> None:
-    kwargs = _anthropic_kwargs(None, headers={"request-id": "req_stream1"}, stream=True)
-    event = request_log.event_from_litellm(kwargs, _FakeResponse(), None, None, outcome="success")
-    assert event.streaming is True
-    assert event.provider_request_id == "req_stream1"
-
-    exc = _anthropic_error(400, ANTHROPIC_BLOCK_BODY)
-    failed = request_log.event_from_litellm(
-        _anthropic_kwargs(exc, stream=True), None, None, None, outcome="error"
-    )
-    assert failed.streaming is True
-    assert failed.provider_request_id == "req_011CVBodyOnly00"
-
-
-def test_litellm_event_carries_bound_agent_context_and_retry_attempt() -> None:
-    token = request_log.bind_call_context("agent-7", "Recon")
-    try:
-        request_log.set_retry_attempt(2)
-        event = request_log.event_from_litellm(
-            _anthropic_kwargs(None), _FakeResponse(), None, None, outcome="success"
-        )
-    finally:
-        request_log.reset_call_context(token)
-    assert (event.agent_id, event.agent_name, event.retry_attempt) == ("agent-7", "Recon", 2)
-    assert request_log.current_call_context().agent_id is None
 
 
 @pytest.mark.asyncio
@@ -338,56 +124,37 @@ async def test_call_context_is_isolated_between_tasks() -> None:
     assert request_log.current_call_context().agent_id is None
 
 
-@pytest.mark.asyncio
-async def test_litellm_logger_dispatches_and_isolates_sink_failures(
-    captured: list[LlmRequestEvent], caplog: pytest.LogCaptureFixture
-) -> None:
-    def boom(_event: LlmRequestEvent) -> None:
-        raise RuntimeError("sink down")
-
-    request_log.register_sink(boom)
-    try:
-        logger = request_log._build_litellm_logger()
-        with caplog.at_level(logging.ERROR, logger="strix.llm.request_log"):
-            await logger.async_log_success_event(
-                _anthropic_kwargs(None, headers={"request-id": "req_dispatch"}),
-                _FakeResponse(),
-                None,
-                None,
-            )
-            await logger.async_log_failure_event(
-                _anthropic_kwargs(_anthropic_error(400, ANTHROPIC_BLOCK_BODY)), None, None, None
-            )
-    finally:
-        request_log.unregister_sink(boom)
-
-    assert [e.outcome for e in captured] == ["success", "error"]
-    assert captured[0].provider_request_id == "req_dispatch"
-    assert captured[1].provider_request_id == "req_011CVBodyOnly00"
-    assert sum("sink down" in r.getMessage() or "failed" in r.getMessage() for r in caplog.records)
-
-
-def test_dispatch_swallows_malformed_callback_payloads(captured: list[LlmRequestEvent]) -> None:
-    request_log._dispatch(cast("Any", None), None, None, None, outcome="success")
-    assert captured == []
-
-
-def test_install_is_idempotent_and_registers_one_litellm_callback() -> None:
+def test_install_is_idempotent() -> None:
     request_log.install()
     request_log.install()
-    ours = [cb for cb in litellm.callbacks if type(cb).__name__ == "_StrixRequestLogger"]
-    assert len(ours) == 1
+    assert request_log.record_http_reply in shared_http_client().event_hooks["response"]
+
+
+def _sample_event(**overrides: object) -> request_log.LlmRequestEvent:
+    start = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
+    defaults: dict[str, object] = {
+        "call_id": "call-1",
+        "route": "openai",
+        "provider": "anthropic",
+        "model": "anthropic/claude-sonnet-4-5",
+        "api_host": "api.anthropic.com",
+        "streaming": False,
+        "outcome": "error",
+        "status_code": 400,
+        "provider_request_id": "req_line01",
+        "response_id": None,
+        "error_type": "APIStatusError",
+        "error_message": "content filtering policy",
+        "started_at": start,
+        "finished_at": start,
+        "duration_ms": 0,
+    }
+    defaults.update(overrides)
+    return request_log.LlmRequestEvent(**defaults)  # type: ignore[arg-type]
 
 
 def test_log_line_sink_formats_without_content(caplog: pytest.LogCaptureFixture) -> None:
-    exc = _anthropic_error(400, ANTHROPIC_BLOCK_BODY, {"request-id": "req_line01"})
-    event = request_log.event_from_litellm(
-        _anthropic_kwargs(exc, headers={"request-id": "req_line01"}),
-        None,
-        None,
-        None,
-        outcome="error",
-    )
+    event = _sample_event()
     with caplog.at_level(logging.DEBUG, logger="strix.llm.request_log"):
         request_log._log_line_sink(event)
     line = caplog.records[-1].getMessage()
@@ -395,32 +162,26 @@ def test_log_line_sink_formats_without_content(caplog: pytest.LogCaptureFixture)
     assert "status=400" in line
     assert "provider=anthropic" in line
     assert "upstream=- upstream_error=-" in line
-    assert "SECRET PROMPT" not in line
 
 
 def test_log_line_names_upstream_recorded_during_attempt(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    exc = _anthropic_error(400, ANTHROPIC_BLOCK_BODY, {})
     token = request_log._http_reply.set(request_log.HttpReply())
     try:
         request_log.record_upstream_provider("Together", "provider_unavailable")
-        event = request_log.event_from_litellm(
-            _anthropic_kwargs(exc), None, None, None, outcome="error"
+        event = _sample_event(
+            details={
+                "upstream_provider": "Together",
+                "upstream_error_type": "provider_unavailable",
+            }
         )
     finally:
         request_log._http_reply.reset(token)
-    assert event.details is not None
-    assert event.details["upstream_provider"] == "Together"
     with caplog.at_level(logging.DEBUG, logger="strix.llm.request_log"):
         request_log._log_line_sink(event)
     line = caplog.records[-1].getMessage()
     assert "upstream=Together upstream_error=provider_unavailable" in line
-
-
-# --------------------------------------------------------------------------- #
-# sizes, timing, finish reason, free-form headers and details                  #
-# --------------------------------------------------------------------------- #
 
 
 def test_response_headers_keep_everything_as_sent() -> None:
@@ -541,98 +302,6 @@ def test_json_size_counts_utf8_bytes_of_compact_json() -> None:
     assert request_log.json_size(object()) is not None  # default=str fallback
 
 
-def test_litellm_success_carries_sizes_finish_reason_headers_and_details() -> None:
-    kwargs = _anthropic_kwargs(
-        None,
-        headers={
-            "request-id": "req_ok",
-            "anthropic-ratelimit-requests-remaining": "49",
-            "anthropic-ratelimit-tokens-remaining": "39000",
-            "anthropic-organization-id": "org-123",
-        },
-    )
-    kwargs["optional_params"] = {
-        "max_tokens": 4096,
-        "temperature": 0,
-        "tools": [{"name": "a"}, {"name": "b"}],
-        "extra_headers": {"authorization": "Bearer x"},
-    }
-    kwargs["standard_logging_object"]["hidden_params"]["model_id"] = "m-1"
-    kwargs["standard_logging_object"]["cache_hit"] = False
-
-    class _Choice:
-        finish_reason = "tool_calls"
-        provider_specific_fields: ClassVar[dict[str, Any]] = {"stop_sequence": None}
-
-    class _Response(_FakeResponse):
-        choices: ClassVar[list[Any]] = [_Choice()]
-        system_fingerprint = "fp_1"
-
-    event = request_log.event_from_litellm(kwargs, _Response(), None, None, outcome="success")
-
-    expected_request = request_log.json_size(
-        {
-            "model": "anthropic/claude-sonnet-4-5",
-            "messages": [{"role": "user", "content": "SECRET PROMPT"}],
-            "max_tokens": 4096,
-            "temperature": 0,
-            "tools": [{"name": "a"}, {"name": "b"}],
-            "extra_headers": {"authorization": "Bearer x"},
-        }
-    )
-    assert event.request_bytes == expected_request
-    assert event.response_bytes is not None and event.response_bytes > 0
-    assert event.finish_reason == "tool_calls"
-    assert event.response_headers == {
-        "request-id": "req_ok",
-        "anthropic-ratelimit-requests-remaining": "49",
-        "anthropic-ratelimit-tokens-remaining": "39000",
-        "anthropic-organization-id": "org-123",
-    }
-    assert event.details is not None
-    assert event.details["request"] == {
-        "max_tokens": 4096,
-        "temperature": 0,
-        "tools": [{"name": "a"}, {"name": "b"}],
-        "extra_headers": {"authorization": "Bearer x"},
-        "message_count": 1,
-        "tool_count": 2,
-    }
-    assert event.details["response"]["id"] == "msg_01abc"
-    assert event.details["response"]["system_fingerprint"] == "fp_1"
-    assert event.details["response"]["usage"]["cache_read_input_tokens"] == 100
-    assert event.details["response"]["choice"] == {"finish_reason": "tool_calls"}
-    assert event.details["response"]["choice_count"] == 1
-    assert event.details["litellm"] == {
-        "response_cost": 0.0123,
-        "model_id": "m-1",
-        "cache_hit": False,
-    }
-    assert event.time_to_first_token_ms is None
-    assert "SECRET PROMPT" not in str(event.to_dict())
-    assert "SECRET COMPLETION" not in str(event.to_dict())
-
-
-def test_litellm_request_size_prefers_the_provider_payload_litellm_built() -> None:
-    kwargs = _anthropic_kwargs(None)
-    payload = {"model": "claude-sonnet-4-5", "system": "S", "messages": [], "max_tokens": 1}
-    kwargs["additional_args"] = {
-        "complete_input_dict": payload,
-        "headers": {"x-api-key": "sk-ant-secret"},
-    }
-    event = request_log.event_from_litellm(kwargs, _FakeResponse(), None, None, outcome="success")
-    assert event.request_bytes == request_log.json_size(payload)
-    assert "sk-ant-secret" not in str(event.to_dict())
-
-
-def test_litellm_request_size_accepts_the_serialized_payload_streaming_adapters_record() -> None:
-    kwargs = _anthropic_kwargs(None, stream=True)
-    payload = '{"model":"claude-sonnet-4-5","messages":[],"max_tokens":1,"stream":true}'
-    kwargs["additional_args"] = {"complete_input_dict": payload}
-    event = request_log.event_from_litellm(kwargs, _FakeResponse(), None, None, outcome="success")
-    assert event.request_bytes == len(payload.encode())
-
-
 def test_openrouter_generation_id_is_the_request_id_and_the_cloudflare_ray_is_not() -> None:
     headers = {"cf-ray": "a3f5d8f23fde88dc-PDX", "x-generation-id": "gen-1790127690-M8vfqPTAr"}
     assert request_log.request_id_from_reply(headers) == "gen-1790127690-M8vfqPTAr"
@@ -643,189 +312,8 @@ def test_openrouter_generation_id_is_the_request_id_and_the_cloudflare_ray_is_no
 def test_request_id_in_the_error_body_when_the_gateway_strips_the_header() -> None:
     """A gateway that strips ``request-id`` still forwards Anthropic's body."""
     body = '{"type":"error","error":{"type":"not_found_error"},"request_id":"req_body1"}'
-    exc = _anthropic_error(404, body, {"cf-ray": "a3f5-PDX", "content-type": "application/json"})
-    event = request_log.event_from_litellm(
-        _anthropic_kwargs(exc), None, None, None, outcome="error"
-    )
-    assert event.provider_request_id == "req_body1"
     assert request_log.request_id_from_reply({"cf-ray": "a3f5-PDX"}, body) == "req_body1"
     assert request_log.request_id_from_reply({"cf-ray": "a3f5-PDX"}, "no id here") is None
-
-
-def test_litellm_streaming_time_to_first_token_from_completion_start() -> None:
-    kwargs = _anthropic_kwargs(None, stream=True)
-    start = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
-    kwargs["completion_start_time"] = start + timedelta(milliseconds=420)
-    end = start + timedelta(seconds=3)
-
-    event = request_log.event_from_litellm(kwargs, _FakeResponse(), start, end, outcome="success")
-
-    assert event.streaming is True
-    assert event.time_to_first_token_ms == 420
-    assert event.duration_ms == 3000
-
-    no_first = request_log.event_from_litellm(
-        _anthropic_kwargs(None, stream=True), _FakeResponse(), start, end, outcome="success"
-    )
-    assert no_first.time_to_first_token_ms is None
-
-
-def test_litellm_failure_carries_status_body_size_headers_and_error_details() -> None:
-    body = '{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}'
-    exc = _anthropic_error(
-        429,
-        body,
-        {
-            "request-id": "req_429",
-            "retry-after": "7",
-            "anthropic-ratelimit-requests-remaining": "0",
-            "content-type": "application/json",
-        },
-    )
-    kwargs = _anthropic_kwargs(exc)
-    kwargs["optional_params"] = {"max_tokens": 10}
-
-    event = request_log.event_from_litellm(kwargs, None, None, None, outcome="error")
-
-    assert event.status_code == 429
-    assert event.provider_request_id == "req_429"
-    assert event.request_bytes is not None and event.request_bytes > 0
-    assert event.response_bytes == len(body.encode())
-    assert event.response_headers == {
-        "request-id": "req_429",
-        "retry-after": "7",
-        "anthropic-ratelimit-requests-remaining": "0",
-        "content-type": "application/json",
-    }
-    assert event.details is not None
-    assert event.details["request"] == {"max_tokens": 10, "message_count": 1}
-    assert event.details["error"]["llm_provider"] == "anthropic"
-    assert event.finish_reason is None
-    assert "sk-ant-secret" not in str(event.to_dict())
-
-
-def test_litellm_failure_without_a_reply_has_no_status_headers_or_size() -> None:
-    exc = APITimeoutError(httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
-    kwargs = _anthropic_kwargs(exc)
-    kwargs["standard_logging_object"]["error_information"]["error_code"] = ""
-    event = request_log.event_from_litellm(kwargs, None, None, None, outcome="error")
-    assert event.status_code is None
-    assert event.response_headers is None
-    assert event.response_bytes is None
-    assert event.error_type == "APITimeoutError"
-
-
-def test_litellm_connection_failure_drops_the_synthetic_500() -> None:
-    exc = LiteLlmConnectionError(
-        message="Connection refused", llm_provider="openrouter", model="openrouter/x"
-    )
-    kwargs = _anthropic_kwargs(exc)
-    event = request_log.event_from_litellm(kwargs, None, None, None, outcome="error")
-    assert exc.status_code == 500
-    assert event.status_code is None
-    assert event.response_bytes is None
-    assert event.provider_request_id is None
-
-
-def test_litellm_timeout_drops_the_synthetic_408() -> None:
-    exc = LiteLlmTimeout(message="Request timed out.", model="x", llm_provider="openrouter")
-    kwargs = _anthropic_kwargs(exc)
-    event = request_log.event_from_litellm(kwargs, None, None, None, outcome="error")
-    assert exc.status_code == 408
-    assert event.status_code is None
-    assert event.response_bytes is None
-
-
-def test_litellm_api_error_with_headers_keeps_its_status() -> None:
-    body = '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
-    exc = LiteLlmApiError(
-        status_code=529,
-        message=f"AnthropicException - b'{body}'",
-        llm_provider="anthropic",
-        model="x",
-    )
-    # LiteLLM's exception mapping attaches the reply's headers this way.
-    exc.litellm_response_headers = {"request-id": "req_529"}  # type: ignore[attr-defined]
-    kwargs = _anthropic_kwargs(exc)
-    event = request_log.event_from_litellm(kwargs, None, None, None, outcome="error")
-    assert event.status_code == 529
-    assert event.provider_request_id == "req_529"
-    assert event.response_bytes == len(body.encode())
-    assert event.details is not None
-    assert event.details["error"]["body"] == {
-        "type": "error",
-        "error": {"type": "overloaded_error", "message": "Overloaded"},
-    }
-
-
-def test_litellm_mapped_error_without_a_json_body_has_no_size_but_keeps_its_status() -> None:
-    exc = LiteLlmApiError(
-        status_code=502,
-        message="OpenrouterException - <html>bad gateway</html>",
-        llm_provider="openrouter",
-        model="x",
-    )
-    exc.litellm_response_headers = {"cf-ray": "a3f5-PDX"}  # type: ignore[attr-defined]
-    event = request_log.event_from_litellm(
-        _anthropic_kwargs(exc), None, None, None, outcome="error"
-    )
-    assert event.status_code == 502
-    assert event.response_bytes is None
-    assert event.provider_request_id is None
-    assert event.response_headers == {"cf-ray": "a3f5-PDX"}
-    assert event.details is not None
-    assert "body" not in event.details["error"]
-
-
-def test_litellm_mapped_error_sizes_the_body_it_kept_not_its_empty_stand_in_response() -> None:
-    # LiteLLM's mapped exceptions subclass openai.APIStatusError and carry an
-    # httpx.Response with no content; the reply body lives on ``body``/``message``.
-    body = {"error": {"message": "User not found.", "code": 401}}
-    exc = LiteLlmAuthenticationError(
-        message="OpenrouterException - " + json.dumps(body, separators=(",", ":")),
-        llm_provider="openrouter",
-        model="x",
-    )
-    assert isinstance(exc, APIStatusError)
-    assert exc.response.content == b""
-    exc.litellm_response_headers = {"cf-ray": "a3f5-PDX"}  # type: ignore[attr-defined]
-    event = request_log.event_from_litellm(
-        _anthropic_kwargs(exc), None, None, None, outcome="error"
-    )
-    assert event.status_code == 401
-    assert event.response_bytes == len(json.dumps(body, separators=(",", ":")).encode())
-
-
-def test_litellm_host_is_the_configured_endpoint_not_the_provider_default() -> None:
-    # On a non-streamed call through a gateway, LiteLLM's hidden api_base can be
-    # the provider default (api.openai.com) while the call went to the gateway.
-    kwargs = _anthropic_kwargs(None)
-    kwargs["litellm_params"] = {"api_base": "https://openrouter.ai/api/v1/"}
-    kwargs["standard_logging_object"]["api_base"] = "https://openrouter.ai/api/v1"
-    kwargs["standard_logging_object"]["hidden_params"]["api_base"] = "https://api.openai.com"
-    event = request_log.event_from_litellm(kwargs, _FakeResponse(), None, None, outcome="success")
-    assert event.api_host == "openrouter.ai"
-
-
-def test_to_dict_and_log_line_include_new_fields() -> None:
-    kwargs = _anthropic_kwargs(None, headers={"request-id": "req_ok"}, stream=True)
-    start = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
-    kwargs["completion_start_time"] = start + timedelta(milliseconds=100)
-    event = request_log.event_from_litellm(
-        kwargs, _FakeResponse(), start, start + timedelta(seconds=1), outcome="success"
-    )
-    data = event.to_dict()
-    for key in (
-        "request_bytes",
-        "response_bytes",
-        "time_to_first_token_ms",
-        "finish_reason",
-        "response_headers",
-        "details",
-    ):
-        assert key in data
-    assert "rate_limit" not in data
-    assert data["time_to_first_token_ms"] == 100
 
 
 # --------------------------------------------------------------------------- #
@@ -1464,14 +952,14 @@ def test_failure_text_appends_header_id_for_openai_errors() -> None:
 
 
 def test_failure_text_does_not_duplicate_body_id() -> None:
-    exc = _anthropic_error(400, ANTHROPIC_BLOCK_BODY)
+    exc = _openai_status_error(400, "req_011CVBodyOnly00", ANTHROPIC_BLOCK_BODY)
     text = request_log.failure_text(exc)
     assert text.count("req_011CVBodyOnly00") == 1
     assert "[provider request id" not in text
 
 
-def test_failure_text_uses_litellm_exception_headers() -> None:
-    exc = _anthropic_error(401, "bad key", {"request-id": "req_exc_hdr"})
+def test_failure_text_uses_exception_headers() -> None:
+    exc = _openai_status_error(401, "req_exc_hdr", "bad key")
     text = request_log.failure_text(exc)
     assert "bad key" in text
     assert text.endswith("[provider request id: req_exc_hdr]")

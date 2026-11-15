@@ -62,7 +62,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 Outcome = Literal["success", "error"]
-Route = Literal["litellm", "openai"]
+Route = Literal["openai"]
 
 ERROR_MESSAGE_MAX_CHARS = 2000
 
@@ -476,79 +476,13 @@ def _to_datetime(value: object, fallback: datetime) -> datetime:
     return fallback
 
 
-# --------------------------------------------------------------------------- #
-# LiteLLM route                                                                #
-# --------------------------------------------------------------------------- #
-
-
-def _litellm_usage(response: object) -> dict[str, int | None]:
-    usage = getattr(response, "usage", None)
-    if usage is None:
-        return {}
-    prompt = _int_or_none(getattr(usage, "prompt_tokens", None))
-    completion = _int_or_none(getattr(usage, "completion_tokens", None))
-    total = _int_or_none(getattr(usage, "total_tokens", None))
-    details = getattr(usage, "prompt_tokens_details", None)
-    cached = _int_or_none(getattr(details, "cached_tokens", None)) if details else None
-    if cached is None:
-        cached = _int_or_none(getattr(usage, "cache_read_input_tokens", None))
-    return {
-        "input_tokens": prompt,
-        "output_tokens": completion,
-        "cached_input_tokens": cached,
-        "total_tokens": total,
-    }
-
-
 def _finish_reason(value: object) -> str | None:
     text = _str_or_none(value)
     return text[:FINISH_REASON_MAX_CHARS] if text else None
 
 
-def _litellm_finish_reason(response: object) -> str | None:
-    choices = getattr(response, "choices", None)
-    if not isinstance(choices, list) or not choices:
-        return None
-    first: object = cast("list[object]", choices)[0]
-    return _finish_reason(getattr(first, "finish_reason", None))
-
-
-def _litellm_request_body(kwargs: Mapping[str, Any]) -> object:
-    """The request as LiteLLM sent it, for its size only.
-
-    The provider payload LiteLLM built (``additional_args.complete_input_dict``)
-    when the adapter recorded it; otherwise model, messages and the provider
-    params, which is the same information before translation.
-    """
-    additional = _mapping(kwargs.get("additional_args"))
-    payload = additional.get("complete_input_dict") if additional else None
-    if isinstance(payload, str | bytes) and payload:
-        return payload
-    if _mapping(payload):
-        return payload
-    body: dict[str, Any] = {"model": kwargs.get("model")}
-    messages = kwargs.get("messages")
-    if messages is not None:
-        body["messages"] = messages
-    optional = _mapping(kwargs.get("optional_params"))
-    if optional:
-        body.update(optional)
-    return body
-
-
 def _count(value: object) -> int | None:
     return len(cast("Sequence[object]", value)) if isinstance(value, Sequence | Mapping) else None
-
-
-def _litellm_request_details(kwargs: Mapping[str, Any]) -> dict[str, Any]:
-    optional = _mapping(kwargs.get("optional_params")) or {}
-    request: dict[str, Any] = dict(optional)
-    counts = {
-        "message_count": _count(kwargs.get("messages")),
-        "tool_count": _count(optional.get("tools") or optional.get("functions")),
-    }
-    request.update({k: v for k, v in counts.items() if v is not None})
-    return request
 
 
 def _exception_details(exc: BaseException | None) -> dict[str, Any] | None:
@@ -631,280 +565,15 @@ def _exception_body_size(exc: BaseException, status_code: int | None) -> int | N
     return json_size(_error_body(exc))
 
 
-def _litellm_reply_status(exc: BaseException, headers: Mapping[str, Any] | None) -> int | None:
-    """The status of the provider's reply, or None when no reply arrived.
-
-    LiteLLM stamps a status on every exception, including 408 on timeouts and
-    500 on connection failures that never reached the provider. Those are the
-    non-status ``APIError`` family and carry no response headers; a reply that
-    was received always does.
-    """
-    if isinstance(exc, APIError) and not isinstance(exc, APIStatusError) and not headers:
-        return None
-    return _int_or_none(getattr(exc, "status_code", None))
-
-
 def _headers_mapping(headers: object) -> Mapping[str, Any] | None:
     return cast("Mapping[str, Any]", headers) if isinstance(headers, Mapping) else None
 
 
-def event_from_litellm(
-    kwargs: Mapping[str, Any],
-    response: object,
-    start_time: object,
-    end_time: object,
-    *,
-    outcome: Outcome,
-) -> LlmRequestEvent:
-    """Build the event from a LiteLLM success/failure callback payload."""
-    now = datetime.now(UTC)
-    started = _to_datetime(start_time, now)
-    finished = _to_datetime(end_time, now)
-    slo = _mapping(kwargs.get("standard_logging_object")) or {}
-    hidden = _mapping(slo.get("hidden_params")) or {}
-    litellm_params = _mapping(kwargs.get("litellm_params")) or {}
-    error_info = _mapping(slo.get("error_information")) or {}
-    exc = kwargs.get("exception")
-    exc = exc if isinstance(exc, BaseException) else None
-
-    provider = (
-        _str_or_none(kwargs.get("custom_llm_provider"))
-        or _str_or_none(slo.get("custom_llm_provider"))
-        or _str_or_none(error_info.get("llm_provider"))
-        or _str_or_none(litellm_params.get("custom_llm_provider"))
-    )
-    model = _str_or_none(kwargs.get("model")) or _str_or_none(slo.get("model")) or "unknown"
-    # The endpoint the call was configured with. LiteLLM's hidden ``api_base``
-    # can be the provider default (``api.openai.com``) on a non-streamed call
-    # that actually went to a gateway.
-    host = api_host(
-        _str_or_none(litellm_params.get("api_base"))
-        or _str_or_none(slo.get("api_base"))
-        or _str_or_none(hidden.get("api_base"))
-    )
-    streaming = bool(kwargs.get("stream")) or bool(slo.get("stream"))
-    call_id = (
-        _str_or_none(kwargs.get("litellm_call_id"))
-        or _str_or_none(slo.get("litellm_call_id"))
-        or str(uuid.uuid4())
-    )
-
-    # LiteLLM stores the reply's headers on the logging object or on the
-    # response, depending on the adapter; the first non-empty block is the reply.
-    response_hidden = _mapping(getattr(response, "_hidden_params", None)) or {}
-    reply_headers = _mapping(hidden.get("additional_headers")) or _mapping(
-        response_hidden.get("additional_headers")
-    )
-
-    ttft_ms: int | None = None
-    if streaming:
-        first = kwargs.get("completion_start_time")
-        if first is not None:
-            first_at = _to_datetime(first, started)
-            ttft_ms = max(0, int((first_at - started).total_seconds() * 1000))
-
-    context = current_call_context()
-    base = LlmRequestEvent(
-        call_id=call_id,
-        route="litellm",
-        provider=provider,
-        model=model,
-        api_host=host,
-        streaming=streaming,
-        outcome=outcome,
-        status_code=None,
-        provider_request_id=request_id_from_reply(reply_headers),
-        response_id=None,
-        error_type=None,
-        error_message=None,
-        started_at=started,
-        finished_at=finished,
-        duration_ms=max(0, int((finished - started).total_seconds() * 1000)),
-        agent_id=context.agent_id,
-        agent_name=context.agent_name,
-        retry_attempt=context.retry_attempt,
-        request_bytes=json_size(_litellm_request_body(kwargs)),
-        time_to_first_token_ms=ttft_ms,
-        response_headers=headers_from_response(reply_headers),
-    )
-    if outcome == "success":
-        return _litellm_success(base, kwargs, response, hidden, slo)
-    return _litellm_failure(base, kwargs, exc, error_info, slo, reply_headers)
-
-
-def _litellm_response_details(response: object) -> dict[str, Any] | None:
-    """Everything LiteLLM's normalized response says about the call except the choices."""
-    if isinstance(response, BaseModel):
-        summary: dict[str, Any] = response.model_dump(exclude={"choices"}, exclude_none=True)
-    else:
-        summary = {}
-        for name in ("id", "created", "model", "object", "system_fingerprint", "service_tier"):
-            value = getattr(response, name, None)
-            if value is not None:
-                summary[name] = value
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            summary["usage"] = usage
-    choices = getattr(response, "choices", None)
-    if isinstance(choices, list) and choices:
-        first: object = cast("list[object]", choices)[0]
-        summary["choice"] = {
-            "finish_reason": getattr(first, "finish_reason", None),
-            "provider_specific_fields": getattr(first, "provider_specific_fields", None),
-        }
-        summary["choice_count"] = len(cast("list[object]", choices))
-    return summary or None
-
-
-def _litellm_hidden_details(hidden: Mapping[str, Any], slo: Mapping[str, Any]) -> dict[str, Any]:
-    """LiteLLM's own bookkeeping for the call (model id, cache hit, overhead, cost basis)."""
-    litellm_info: dict[str, Any] = {
-        k: v for k, v in hidden.items() if k not in {"additional_headers", "api_base"}
-    }
-    for name in ("cache_hit", "saved_cache_cost", "model_group", "model_id"):
-        value = slo.get(name)
-        if value is not None:
-            litellm_info.setdefault(name, value)
-    return litellm_info
-
-
-def _litellm_success(
-    base: LlmRequestEvent,
-    kwargs: Mapping[str, Any],
-    response: object,
-    hidden: Mapping[str, Any],
-    slo: Mapping[str, Any],
-) -> LlmRequestEvent:
-    usage = _litellm_usage(response)
-    cost = _float_or_none(kwargs.get("response_cost"))
-    if cost is None:
-        cost = _float_or_none(hidden.get("response_cost"))
-    return replace(
-        base,
-        status_code=200,
-        response_id=_str_or_none(getattr(response, "id", None)),
-        input_tokens=usage.get("input_tokens"),
-        output_tokens=usage.get("output_tokens"),
-        cached_input_tokens=usage.get("cached_input_tokens"),
-        total_tokens=usage.get("total_tokens"),
-        cost_usd=cost,
-        response_bytes=json_size(response),
-        finish_reason=_litellm_finish_reason(response),
-        details=merge_details(
-            ("request", _litellm_request_details(kwargs)),
-            ("response", _litellm_response_details(response)),
-            ("litellm", _litellm_hidden_details(hidden, slo)),
-            *_upstream_details(_http_reply.get()),
-        ),
-    )
-
-
-def _litellm_failure(
-    base: LlmRequestEvent,
-    kwargs: Mapping[str, Any],
-    exc: BaseException | None,
-    error_info: Mapping[str, Any],
-    slo: Mapping[str, Any],
-    reply_headers: Mapping[str, Any] | None,
-) -> LlmRequestEvent:
-    status_code: int | None = None
-    error_type: str | None = None
-    error_message: str | None = None
-    response_bytes: int | None = None
-    error: dict[str, Any] = {}
-    if exc is not None:
-        reply_headers = reply_headers or _exception_headers(exc)
-        status_code = _litellm_reply_status(exc, reply_headers)
-        error_type = type(exc).__name__
-        error_message = clean_error_message(exc)
-        response_bytes = _exception_body_size(exc, status_code)
-        error = _exception_details(exc) or {}
-    else:
-        code = error_info.get("error_code")
-        status_code = _int_or_none(code)
-        if status_code is None and isinstance(code, str) and code.isdigit():
-            status_code = int(code)
-    error_type = error_type or _str_or_none(error_info.get("error_class")) or "Exception"
-    if error_message is None:
-        raw = _str_or_none(error_info.get("error_message")) or _str_or_none(slo.get("error_str"))
-        error_message = raw[:ERROR_MESSAGE_MAX_CHARS] if raw else error_type
-    provider = _str_or_none(error_info.get("llm_provider"))
-    if provider:
-        error.setdefault("llm_provider", provider)
-    hidden = _mapping(slo.get("hidden_params")) or {}
-    return replace(
-        base,
-        status_code=status_code,
-        provider_request_id=request_id_from_reply(reply_headers, error_message),
-        error_type=error_type,
-        error_message=error_message,
-        response_bytes=response_bytes,
-        response_headers=headers_from_response(reply_headers),
-        details=merge_details(
-            ("request", _litellm_request_details(kwargs)),
-            ("error", error or None),
-            ("litellm", _litellm_hidden_details(hidden, slo)),
-            *_upstream_details(_http_reply.get()),
-        ),
-    )
-
-
-def _build_litellm_logger() -> Any:
-    from litellm.integrations.custom_logger import CustomLogger
-
-    class _StrixRequestLogger(CustomLogger):
-        """Forwards each LiteLLM attempt to the registered sinks.
-
-        Only the async handlers are implemented: the engine calls
-        ``acompletion`` exclusively, and LiteLLM schedules these on the calling
-        task, so the agent context bound there still applies. Sync fallbacks
-        run in a thread pool and would lose it.
-        """
-
-        async def async_log_success_event(
-            self, kwargs: dict[str, Any], response_obj: Any, start_time: Any, end_time: Any
-        ) -> None:
-            _dispatch(kwargs, response_obj, start_time, end_time, outcome="success")
-
-        async def async_log_failure_event(
-            self, kwargs: dict[str, Any], response_obj: Any, start_time: Any, end_time: Any
-        ) -> None:
-            _dispatch(kwargs, response_obj, start_time, end_time, outcome="error")
-
-    return _StrixRequestLogger()
-
-
-def _dispatch(
-    kwargs: Mapping[str, Any], response: object, start: object, end: object, *, outcome: Outcome
-) -> None:
-    try:
-        event = event_from_litellm(kwargs, response, start, end, outcome=outcome)
-    except Exception:
-        logger.exception("could not build LLM request event from LiteLLM callback")
-        return
-    emit(event)
-
-
-_litellm_logger: Any | None = None
-
-
 def install() -> None:
-    """Attach the LiteLLM capture (idempotent), the native-route reply capture
-    and the default log-line sink."""
-    global _litellm_logger  # noqa: PLW0603
+    """Attach the OpenAI-route reply capture and the default log-line sink (idempotent)."""
     if _log_line_sink not in _sinks:
         _sinks.insert(0, _log_line_sink)
     _observe_sdk_shared_http_client()
-    if _litellm_logger is not None:
-        return
-    import litellm
-
-    capture = _build_litellm_logger()
-    _litellm_logger = capture
-    # litellm types this list with a bare Callable, which strict pyright cannot resolve.
-    callbacks = litellm.callbacks  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-    if capture not in callbacks:
-        callbacks.append(capture)  # pyright: ignore[reportUnknownMemberType]
 
 
 def _observe_sdk_shared_http_client() -> None:
@@ -1439,7 +1108,6 @@ __all__ = [
     "clean_error_message",
     "current_call_context",
     "emit",
-    "event_from_litellm",
     "failure_text",
     "headers_from_response",
     "install",

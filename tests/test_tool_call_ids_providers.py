@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import TYPE_CHECKING, Any, ClassVar
 
-import litellm
 import pytest
 from agents import Agent, ModelSettings, Runner, function_tool
 from agents.run import RunConfig
@@ -244,9 +243,6 @@ def _reset_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(loader, "_cached", None)
     monkeypatch.setattr(loader, "_override", None)
-    # As ``configure_sdk_model_defaults`` sets it, so routes like ``zai/`` that
-    # reject ``parallel_tool_calls`` still get a request out.
-    monkeypatch.setattr(litellm, "drop_params", True)
 
 
 @contextmanager
@@ -307,7 +303,7 @@ async def test_tool_call_ids_are_repaired_on_every_route(
     stream: bool,
 ) -> None:
     scenario = SCENARIOS[scenario_name]
-    if model.startswith("openai/") and not stream and scenario.has_null_id:
+    if not stream and scenario.has_null_id:
         request.applymarker(
             pytest.mark.xfail(
                 strict=True,
